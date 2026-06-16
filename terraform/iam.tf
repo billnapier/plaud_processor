@@ -37,6 +37,13 @@ resource "google_service_account_iam_member" "github_actions_wif_user" {
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.repository/${var.github_owner}/${var.github_repo}"
 }
 
+# Explicit Token Creator role for WIF principal
+resource "google_service_account_iam_member" "github_actions_token_creator" {
+  service_account_id = google_service_account.github_actions.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.repository/${var.github_owner}/${var.github_repo}"
+}
+
 # Grant roles to GitHub Actions SA so it can deploy everything
 resource "google_project_iam_member" "github_actions_editor" {
   project = var.project_id
