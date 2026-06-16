@@ -1,0 +1,75 @@
+name: Deploy Plaud Processor
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+  id-token: 'write'
+
+env:
+  PROJECT_ID: "obsidian-sync-498904"
+  SERVICE_NAME: "plaud-processor"
+  REGION: "us-central1"
+  WIF_PROVIDER: "projects/814149916425/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+  WIF_SERVICE_ACCOUNT: "github-actions-sa@obsidian-sync-498904.iam.gserviceaccount.com"
+
+jobs:
+  deploy:
+    name: "Build and Deploy"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - id: 'auth'
+        name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          workload_identity_provider: '${{ env.WIF_PROVIDER }}'
+          service_account: '${{ env.WIF_SERVICE_ACCOUNT }}'
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init -upgrade
+        working-directory: ./terraform
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: ./terraform
+
+      # 1. Target Registry to ensure it exists before building docker image
+      - name: Terraform Apply Target Registry
+        run: terraform apply -target=google_artifact_registry_repository.repo -auto-approve -input=false
+        working-directory: ./terraform
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authorize Docker push
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      # 2. Build & Push Docker image
+      - name: Build and Push Container
+        run: |
+          docker build -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}:${{ github.sha }} ./app
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+
+      # 3. Apply the rest of the Terraform configuration (including Cloud Run pointing to this built image)
+      - name: Terraform Apply Full
+        run: terraform apply -auto-approve -input=false -var="image_tag=${{ github.sha }}"
+        working-directory: ./terraform
+
+      # 4. Deploy to Firebase Hosting (routing custom domain to Cloud Run)
+      - name: Deploy to Firebase Hosting
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+        run: |
+          npm install -g firebase-tools
+          firebase deploy --only hosting --project ${{ env.PROJECT_ID }} --non-interactive
