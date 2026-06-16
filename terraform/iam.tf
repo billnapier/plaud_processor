@@ -135,6 +135,12 @@ resource "google_project_iam_member" "app_runner_logging" {
   member  = "serviceAccount:${google_service_account.app_runner.email}"
 }
 
+resource "google_project_iam_member" "app_runner_pubsub" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_service_account.app_runner.email}"
+}
+
 # Pub/Sub Invoker Service Account
 resource "google_service_account" "pubsub_invoker" {
   account_id   = "pubsub-invoker"

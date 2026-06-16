@@ -9,11 +9,17 @@
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "@google-cloud/firestore": "^8.6.0",
+    "@google-cloud/pubsub": "^5.3.1",
+    "express": "^4.19.2",
+    "google-auth-library": "^10.7.0",
+    "googleapis": "^173.0.0",
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.12.7",
+    "@types/uuid": "^10.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5"
   }

@@ -103,6 +103,10 @@ resource "google_cloud_run_v2_service" "default" {
         name  = "VAULT_FOLDER_NAME"
         value = "Obsidian Vault"
       }
+      env {
+        name  = "DOMAIN_NAME"
+        value = var.domain_name
+      }
     }
   }
 
