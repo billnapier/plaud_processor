@@ -168,3 +168,14 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.scheduler_invoker.email}"
 }
+
+# Allow unauthenticated invocations on the Cloud Run service
+# (Required for Firebase Hosting custom domain rewrites and Google Drive webhooks)
+resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
+  name     = google_cloud_run_v2_service.default.name
+  location = google_cloud_run_v2_service.default.location
+  project  = google_cloud_run_v2_service.default.project
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
