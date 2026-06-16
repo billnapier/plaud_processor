@@ -42,11 +42,11 @@ graph TD
    - **`POST /pubsub-worker`**
      * **Purpose:** Private endpoint triggered by a Pub/Sub Push Subscription.
      * **Logic:** Receives the message payload, calls the Google Drive API to list the files in the "Inbox" folder. For each found file:
-       1. Acquires a processing lease/lock in Firestore for the `fileId`.
+       1. Acquires a processing lease/lock in Firestore for the `fileId` (using a simple read-then-write check).
        2. Downloads the file content.
        3. Executes the post-processing regex text cleanup.
-       4. Calls the Vertex AI Gemini API using IAM credentials (no keys) to classify the content.
-       5. Moves the file to the target folder in Google Drive.
+       4. Classifies the content programmatically using rule-based/regex routing rules (Gemini API classification is planned for a future phase).
+       5. Moves the file to the target folder in Google Drive. Checks if target folder exists (to prevent duplicate folder creation) and checks if target file exists (appending an incrementing suffix `_1.md`, `_2.md` on collision to ensure uniqueness).
        6. Releases/updates the Firestore state.
    - **`POST /renew-watch`**
      * **Purpose:** Private endpoint triggered by Cloud Scheduler.
@@ -54,7 +54,7 @@ graph TD
 
 2. **GCP Pub/Sub Topic (`drive-file-changes`):**
    * Buffers webhook events and triggers the `/pubsub-worker` asynchronously.
-   * Handles retry backoffs if the Gemini API or Google Drive API experiences temporary outages.
+   * Handles retry backoffs. Note: Since notifications trigger a scan, permanent processing failures (poison pills) will rely on the Pub/Sub dead-letter queue (DLQ) and max retry settings.
 
 3. **Cloud Scheduler Job (`0 */12 * * *`):**
    * Triggers the `/renew-watch` endpoint every 12 hours. This provides a 12-hour overlap safety margin before the 24-hour Google Drive watch subscription expires.
@@ -68,7 +68,7 @@ We manage all infrastructure using Terraform. The structure mirrors the single-e
 ### Terraform Files to Create
 * **`terraform/main.tf`**: Enabling APIs, configuring the Artifact Registry, creating the Pub/Sub Topic and Push Subscription, creating the Cloud Run service, and provisioning Firestore database.
 * **`terraform/firebase.tf`**: Configuring Firebase Hosting to rewrite custom domain requests directly to the Cloud Run service (providing free SSL and simple domain verification).
-* **`terraform/iam.tf`**: Creating the custom service accounts, assigning roles (`roles/datastore.user`, `roles/aiplatform.user`, `roles/logging.logWriter`, `roles/run.invoker`, etc.), and setting up GitHub Workload Identity Federation (WIF).
+* **`terraform/iam.tf`**: Creating the custom service accounts, assigning roles (`roles/datastore.user`, `roles/logging.logWriter`, `roles/run.invoker`, etc.), and setting up GitHub Workload Identity Federation (WIF).
 * **`terraform/scheduler.tf`**: Provisioning the Cloud Scheduler job and granting scheduler permission to trigger the Cloud Run endpoint.
 * **`terraform/variables.tf`** and **`terraform/terraform.tfvars`**: Declaring environment variables (project ID, region, custom domain).
 
@@ -76,7 +76,7 @@ We manage all infrastructure using Terraform. The structure mirrors the single-e
 * **No Staging Environment:** The deployment targets a single production GCP project.
 * **Workload Identity Federation (WIF):** Authenticates the GitHub Actions runner against GCP without managing long-lived Service Account keys.
 * **Service Accounts:**
-  * `app-runner`: Runs the Cloud Run instance. Requires permissions to access Google Drive API, Firestore (`roles/datastore.user`), Vertex AI (`roles/aiplatform.user`), and logging.
+  * `app-runner`: Runs the Cloud Run instance. Requires permissions to access Google Drive API, Firestore (`roles/datastore.user`), and logging.
   * `pubsub-invoker`: Impersonated by Pub/Sub to call the `/pubsub-worker` endpoint securely.
   * `scheduler-invoker`: Impersonated by Cloud Scheduler to call the `/renew-watch` endpoint.
 
@@ -99,9 +99,8 @@ For the integration to work seamlessly, the following must be set up:
 
 When writing the application code:
 * **Runtime:** Use Node.js and TypeScript.
-* **Gemini SDK:** Use the official `@google/genai` (Node.js) client configured to use **Vertex AI** via application default credentials (`aiplatform.user` IAM role).
-* **Structured Outputs:** Enforce a JSON schema on Gemini classification calls so the model strictly returns one of the predefined folder names/IDs.
+* **Gemini SDK (Future Milestone):** In a later phase, use the official `@google/genai` (Node.js) client configured to use **Vertex AI** via application default credentials (`aiplatform.user` IAM role) with structured JSON schemas to classify transcripts.
 * **State & Loop Management:** 
   - Since the watch channel is established *only* on the Inbox folder, events are triggered by additions and moves/deletions.
   - The worker must query the files currently inside the Inbox folder. If no files exist (e.g. after a file has been successfully moved out of the Inbox), the worker exits gracefully.
-  - Firestore must be updated with the `fileId` state to lock files currently processing, preventing duplicate runs from concurrent Pub/Sub retries.
+  - Firestore must be updated with the `fileId` state to lock files currently processing, preventing duplicate runs from concurrent Pub/Sub retries. Simple read-then-write checks are used for locks.
