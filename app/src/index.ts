@@ -74,28 +74,35 @@ async function verifyOidcToken(req: Request): Promise<boolean> {
 }
 
 /**
- * Finds a folder ID by name, or creates a new folder in the root if not found.
+ * Finds a folder ID by name. Throws an error if not found.
  */
-async function getOrCreateRootFolder(folderName: string): Promise<string> {
+async function getRootFolder(folderName: string): Promise<string> {
   const query = `mimeType = 'application/vnd.google-apps.folder' and name = '${folderName.replace(/'/g, "\\'")}' and trashed = false`;
   const response = await drive.files.list({
     q: query,
-    fields: 'files(id, name)',
+    fields: 'files(id, name, owners)',
     spaces: 'drive',
   });
   const files = response.data.files;
-  if (files && files.length > 0) {
-    return files[0].id!;
+  if (!files || files.length === 0) {
+    throw new Error(`Required folder "${folderName}" was not found. Please ensure it exists and is shared with the service account.`);
   }
-  console.log(`Creating missing root folder: ${folderName}`);
-  const createResponse = await drive.files.create({
-    requestBody: {
-      name: folderName,
-      mimeType: 'application/vnd.google-apps.folder',
-    },
-    fields: 'id',
-  });
-  return createResponse.data.id!;
+
+  // Log all matching folders to assist in debugging
+  console.log(`Found ${files.length} folder(s) matching "${folderName}":`);
+  for (const f of files) {
+    console.log(`- ID: ${f.id}, Owners: ${JSON.stringify(f.owners?.map(o => o.emailAddress))}`);
+  }
+
+  // Prefer folder owned by a user (not the service account itself) if possible
+  const userOwnedFolder = files.find(f => f.owners?.some(o => o.emailAddress && !o.emailAddress.endsWith('.gserviceaccount.com')));
+  if (userOwnedFolder) {
+    console.log(`Using user-owned folder for "${folderName}": ${userOwnedFolder.id}`);
+    return userOwnedFolder.id!;
+  }
+
+  console.log(`Using folder: ${files[0].id}`);
+  return files[0].id!;
 }
 
 /**
@@ -301,8 +308,8 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
     const stagingFolderName = process.env.STAGING_FOLDER_NAME || 'Obsidian Staging';
     const vaultFolderName = process.env.VAULT_FOLDER_NAME || 'Obsidian Vault';
 
-    const stagingFolderId = await getOrCreateRootFolder(stagingFolderName);
-    const vaultFolderId = await getOrCreateRootFolder(vaultFolderName);
+    const stagingFolderId = await getRootFolder(stagingFolderName);
+    const vaultFolderId = await getRootFolder(vaultFolderName);
 
     // List all files currently in the watched Obsidian Staging folder
     const listResponse = await drive.files.list({
@@ -475,7 +482,7 @@ app.post('/renew-watch', async (req: Request, res: Response) => {
 
   try {
     const stagingFolderName = process.env.STAGING_FOLDER_NAME || 'Obsidian Staging';
-    const stagingFolderId = await getOrCreateRootFolder(stagingFolderName);
+    const stagingFolderId = await getRootFolder(stagingFolderName);
 
     const channelRef = db.collection('watch_channels').doc('inbox_channel');
     const oldChannelDoc = await channelRef.get();
