@@ -144,8 +144,30 @@ async function resolvePath(pathParts: string[], rootFolderId: string): Promise<s
 
 /**
  * Finds a unique filename in the target folder by appending an incrementing suffix on collision.
+ * Retrieves all files in the directory to perform a case-insensitive check and avoid duplicate HTTP calls.
  */
-async function getUniqueFileName(folderId: string, baseName: string): Promise<string> {
+async function getUniqueFileName(folderId: string, baseName: string, excludeFileId?: string): Promise<string> {
+  const existingNames = new Set<string>();
+  let pageToken: string | undefined = undefined;
+
+  do {
+    const response: any = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name)',
+      pageSize: 1000,
+      pageToken,
+    });
+
+    const files = response.data.files || [];
+    for (const f of files) {
+      if (f.name && f.id !== excludeFileId) {
+        existingNames.add(f.name.toLowerCase());
+      }
+    }
+
+    pageToken = response.data.nextPageToken || undefined;
+  } while (pageToken);
+
   let name = baseName;
   let ext = '';
   const lastDot = baseName.lastIndexOf('.');
@@ -159,13 +181,7 @@ async function getUniqueFileName(folderId: string, baseName: string): Promise<st
   let suffix = 0;
   while (true) {
     const candidateName = suffix === 0 ? `${name}${ext}` : `${name}_${suffix}${ext}`;
-    const query = `name = '${candidateName.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`;
-    const response = await drive.files.list({
-      q: query,
-      fields: 'files(id)',
-      spaces: 'drive',
-    });
-    if (!response.data.files || response.data.files.length === 0) {
+    if (!existingNames.has(candidateName.toLowerCase())) {
       return candidateName;
     }
     suffix++;
@@ -561,7 +577,7 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
           }
         }
 
-        const uniqueFileName = await getUniqueFileName(targetFolderId, targetFileName);
+        const uniqueFileName = await getUniqueFileName(targetFolderId, targetFileName, file.id);
         console.log(`Updating file ${file.name} to ${uniqueFileName} with cleaned content`);
 
         // Update file content and metadata in Drive

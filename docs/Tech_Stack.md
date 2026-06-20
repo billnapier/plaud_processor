@@ -46,7 +46,7 @@ graph TD
        2. Downloads the file content.
        3. Executes the post-processing regex text cleanup.
        4. Classifies the content programmatically using rule-based/regex routing rules (Gemini API classification is planned for a future phase).
-       5. Renames the file by combining a resolved date (extracted from content timestamp, title prefix, original filename timestamp/date, or current date fallback) and a sanitized base title (extracted from the first H1 markdown heading, or fallback original name). Prepend date if not already present. Sanitizes illegal characters for Google Drive compatibility.
+       5. Renames the file by combining a resolved date (extracted from content timestamp, title prefix, original filename timestamp/date, or current date fallback) and a sanitized base title (extracted from the first H1 markdown heading, or fallback original name). Prepend date if not already present. Sanitizes illegal characters for Google Drive compatibility. Performs a case-insensitive check of existing filenames in the destination folder to append an incrementing suffix (e.g. `_1`) if there is a collision.
        6. Moves the file to the target folder in Google Drive.
        7. Releases/updates the Firestore state.
    - **`POST /renew-watch`**

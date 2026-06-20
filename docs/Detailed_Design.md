@@ -215,7 +215,7 @@ All processed files are renamed to include a date prefix (`YYYY-MM-DD`) and a sa
 3. **Sanitization & Assembly:**
    * **Sanitization:** All base titles are sanitized to ensure compatibility with Google Drive, Windows, Linux, and Obsidian Vault naming schemes. Slashes (`/` and `\`) are replaced with dashes (`-`), other invalid characters (`:`, `*`, `?`, `"`, `<`, `>`, `|`) are removed, and consecutive whitespaces are collapsed.
    * **Composition:** If the sanitized base title already starts with the resolved date (with or without dashes), it is used directly as `${baseName}.md`. Otherwise, the date is prepended to form `${fileDate} - ${baseName}.md`.
-   * **De-duplication:** If a file with the same name already exists in the target directory, an incrementing suffix (e.g., `_1`, `_2`) is appended to prevent naming conflicts.
+   * **De-duplication:** Google Drive natively allows multiple files with the exact same name in a single folder. However, this causes conflicts on local filesystems (e.g., synced Obsidian vaults). To prevent this, the worker checks the target destination folder before the move, listing all existing names in that directory to perform a case-insensitive match. If a collision is found, an incrementing suffix (e.g., `_1`, `_2`) is appended to the filename.
 
 ---
 
