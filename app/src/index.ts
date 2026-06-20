@@ -233,8 +233,8 @@ function extractDateFromContent(content: string): string | null {
     if (match) {
       const val = match[1].trim().replace(/['"`]/g, '');
 
-      // Try numeric timestamp digits
-      if (/^\d+$/.test(val)) {
+      // Try numeric timestamp digits (length must be 10 or 13)
+      if (/^\d+$/.test(val) && (val.length === 10 || val.length === 13)) {
         let num = parseInt(val, 10);
         if (val.length === 10) {
           num *= 1000;
@@ -267,8 +267,8 @@ function extractDateFromContent(content: string): string | null {
 function extractDateFromFilename(filename: string): string | null {
   const nameWithoutExt = filename.replace(/\.md$/i, '').trim();
 
-  // Try numeric timestamp digits
-  if (/^\d+$/.test(nameWithoutExt)) {
+  // Try numeric timestamp digits (length must be 10 or 13)
+  if (/^\d+$/.test(nameWithoutExt) && (nameWithoutExt.length === 10 || nameWithoutExt.length === 13)) {
     let num = parseInt(nameWithoutExt, 10);
     if (nameWithoutExt.length === 10) {
       num *= 1000;
