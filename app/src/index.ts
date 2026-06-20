@@ -324,6 +324,8 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
     for (const file of files) {
       if (!file.id || !file.name) continue;
 
+      console.log(`Evaluating staging file: ${file.name} (ID: ${file.id}, mimeType: ${file.mimeType})`);
+
       // Filter by mimeType text/plain or extension .md
       const isTxt = file.mimeType === 'text/plain';
       const isMd = file.name.endsWith('.md');
@@ -342,12 +344,16 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
           const data = doc.data();
           if (data) {
             if (data.status === 'completed') {
+              console.log(`File lock check: ${file.name} is already marked as completed in Firestore.`);
               return false;
             }
             if (data.status === 'processing') {
               const lockedAt = data.lockedAt?.toDate();
               if (lockedAt && (now.getTime() - lockedAt.getTime()) < 15 * 60 * 1000) {
+                console.log(`File lock check: ${file.name} is currently locked for processing (locked at ${lockedAt.toISOString()}).`);
                 return false;
+              } else {
+                console.log(`File lock check: ${file.name} lock has expired. Re-acquiring lock.`);
               }
             }
           }
@@ -361,7 +367,7 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
       });
 
       if (!acquired) {
-        console.log(`Skipping file ${file.name} (ID: ${file.id}) - already processing or completed.`);
+        console.log(`Skipping file ${file.name} (ID: ${file.id}) - lock not acquired.`);
         continue;
       }
 
@@ -389,6 +395,7 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
 
         // Resolve filename and safeguard name
         let targetFileName = file.name;
+
         if (classification === 'Journal') {
           const currentYear = new Date().getFullYear();
           const inlineDateRegex = /(?<!\d{4}-)\b(\d{2})-(\d{2})\b/g;
@@ -500,6 +507,7 @@ app.post('/renew-watch', async (req: Request, res: Response) => {
         id: channelId,
         type: 'web_hook',
         address: address,
+        expiration: String(Date.now() + 24 * 60 * 60 * 1000), // Request 24-hour expiration
       },
     });
 
@@ -533,7 +541,24 @@ app.post('/renew-watch', async (req: Request, res: Response) => {
       updatedAt: now.toISOString(),
     });
 
-    res.status(200).send('Watch renewal completed');
+    // Fallback: Trigger Pub/Sub worker to check for new files in staging
+    try {
+      console.log('Triggering Pub/Sub worker from renew-watch as a scheduled fallback...');
+      const topicName = 'drive-file-changes';
+      const dataBuffer = Buffer.from(
+        JSON.stringify({
+          channelId: 'scheduled-fallback-trigger',
+          resourceId: stagingFolderId,
+          resourceState: 'scheduled',
+        })
+      );
+      await pubsub.topic(topicName).publishMessage({ data: dataBuffer });
+      console.log('Successfully published scheduled fallback event to Pub/Sub.');
+    } catch (triggerError: any) {
+      console.error('Failed to publish scheduled fallback event to Pub/Sub (non-fatal):', triggerError);
+    }
+
+    res.status(200).send('Watch renewal and fallback trigger completed');
   } catch (error: any) {
     console.error('Error renewing watch channel:', error);
     res.status(500).send(`Error renewing watch: ${error.message || String(error)}`);

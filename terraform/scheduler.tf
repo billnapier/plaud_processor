@@ -6,8 +6,8 @@ resource "google_project_service" "cloudscheduler_api" {
 # Cloud Scheduler Job targeting /renew-watch
 resource "google_cloud_scheduler_job" "renew_watch" {
   name        = "renew-watch-job"
-  description = "Trigger watch channel renewal every 12 hours"
-  schedule    = "0 */12 * * *"
+  description = "Trigger watch channel renewal and processing fallback every 15 minutes"
+  schedule    = "*/15 * * * *"
   time_zone   = "Etc/UTC"
 
   http_target {
