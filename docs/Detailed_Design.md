@@ -186,8 +186,8 @@ graph TD
   * **Trigger:** Content contains `#Journal`
   * **Destination Folder:** `Obsidian Vault/Journal` (Created recursively if missing)
   * **Filename Resolution:**
-    * Attempt to replace the inline date regex `/(?<!\d{4}-)\b(\d{2})-(\d{2})\b/g` in the filename with `${currentYear}-$1-$2`.
-    * If result is empty or resolves to `.md`, default to `YYYY-MM-DD Journal Note.md` using the current date.
+    * If no H1 markdown title is extracted from the content, the worker attempts to replace the inline date regex `/(?<!\d{4}-)\b(\d{2})-(\d{2})\b/g` in the filename with `${currentYear}-$1-$2`.
+    * If that result is empty or resolves to `.md`, it defaults to `YYYY-MM-DD Journal Note.md` using the current date.
 * **Nested Projects:**
   * **Trigger:** Content matches the regex `#project\/([a-zA-Z0-9_\-]+)` (case-insensitive).
   * **Destination Folder:** `Obsidian Vault/Project Updates/<ProjectName>`
@@ -197,8 +197,14 @@ graph TD
 * **Default Fallback:**
   * If none of the programmatic tags match, the file is routed to `Obsidian Vault/Unfiled`.
 
-### 5.2. Filename Safeguard
-If renaming results in an empty string or `.md`, the worker renames the file to `Plaud Note <timestamp>.md`.
+### 5.2. Filename Resolution & Title Extraction
+1. **Title Extraction:** The worker scans the cleaned markdown content line by line to extract the first H1 heading (the first line starting with `# `).
+2. **Title Sanitization:** If an H1 title is found, it is sanitized to remove or replace invalid filename characters, and is used as the base filename (appended with `.md`).
+3. **Fallback Resolution:** If no H1 title is found in the content, the worker falls back to the original filename processing rules (including Journal date expansion where applicable).
+
+### 5.3. Filename Safeguard & Sanitization
+* **Invalid Characters:** In all cases (both extracted titles and fallback/original filenames), the name is sanitized to ensure compatibility with Google Drive, Windows, Linux, and Obsidian Vault naming schemes. Slashes (`/` and `\`) are replaced with dashes (`-`), and other invalid characters (`:`, `*`, `?`, `"`, `<`, `>`, `|`) are removed.
+* **Empty File Name:** If the resulting filename is empty or resolves to `.md`, the worker renames the file to `Plaud Note <timestamp>.md`.
 
 ---
 

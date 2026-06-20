@@ -191,6 +191,38 @@ function cleanContent(content: string): string {
   return cleaned;
 }
 
+/**
+ * Extracts the first H1 title (a line starting with '# ') from the markdown content.
+ */
+function extractTitleFromContent(content: string): string | null {
+  const lines = content.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('# ')) {
+      const title = trimmed.substring(2).trim();
+      if (title.length > 0) {
+        return title;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Sanitizes a filename to ensure compatibility with Google Drive, Windows, Linux, and Obsidian.
+ * Replaces slashes/backslashes with dashes and removes other invalid/disallowed characters.
+ */
+function sanitizeFilename(name: string): string {
+  // Replace slashes/backslashes with dashes
+  let sanitized = name.replace(/[\/\\]/g, '-');
+  // Remove other invalid characters: : * ? " < > |
+  sanitized = sanitized.replace(/[:*?"<>|]/g, '');
+  // Normalize consecutive whitespace to a single space
+  sanitized = sanitized.replace(/\s+/g, ' ');
+  return sanitized.trim();
+}
+
+
 interface RoutingResult {
   classification: string;
   pathParts: string[];
@@ -393,27 +425,43 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
         // Resolve target directory under Obsidian Vault
         const targetFolderId = await resolvePath(pathParts, vaultFolderId);
 
-        // Resolve filename and safeguard name
-        let targetFileName = file.name;
-
-        if (classification === 'Journal') {
-          const currentYear = new Date().getFullYear();
-          const inlineDateRegex = /(?<!\d{4}-)\b(\d{2})-(\d{2})\b/g;
-          const tempName = targetFileName.replace(inlineDateRegex, `${currentYear}-$1-$2`);
-          const cleanTempName = tempName.trim();
-          if (!cleanTempName || cleanTempName === '.md' || cleanTempName.replace(/\.md$/, '').trim() === '') {
-            const formattedDate = new Date().toISOString().split('T')[0];
-            targetFileName = `${formattedDate} Journal Note.md`;
-          } else {
-            targetFileName = tempName;
+        // Resolve filename: try to extract title from markdown content first
+        let targetFileName = '';
+        const markdownTitle = extractTitleFromContent(cleaned);
+        if (markdownTitle) {
+          const sanitizedTitle = sanitizeFilename(markdownTitle);
+          if (sanitizedTitle.length > 0) {
+            targetFileName = `${sanitizedTitle}.md`;
+            console.log(`Renaming file using extracted title: "${markdownTitle}" -> "${targetFileName}"`);
           }
         }
 
-        // Filename Safeguard
-        const nameWithoutExt = targetFileName.replace(/\.md$/, '').trim();
+        // Fallback to original name/date logic if no markdown title was found
+        if (!targetFileName) {
+          targetFileName = file.name;
+          if (classification === 'Journal') {
+            const currentYear = new Date().getFullYear();
+            const inlineDateRegex = /(?<!\d{4}-)\b(\d{2})-(\d{2})\b/g;
+            const tempName = targetFileName.replace(inlineDateRegex, `${currentYear}-$1-$2`);
+            const cleanTempName = tempName.trim();
+            if (!cleanTempName || cleanTempName === '.md' || cleanTempName.replace(/\.md$/, '').trim() === '') {
+              const formattedDate = new Date().toISOString().split('T')[0];
+              targetFileName = `${formattedDate} Journal Note.md`;
+            } else {
+              targetFileName = tempName;
+            }
+          }
+        }
+
+        // Filename Safeguard & Sanitization
+        let nameWithoutExt = targetFileName.replace(/\.md$/, '').trim();
         if (!targetFileName || targetFileName === '.md' || nameWithoutExt === '') {
           const timestamp = Date.now();
           targetFileName = `Plaud Note ${timestamp}.md`;
+        } else {
+          // Sanitize the filename to remove disallowed characters
+          const sanitizedName = sanitizeFilename(nameWithoutExt);
+          targetFileName = `${sanitizedName}.md`;
         }
 
         // Normalize extension to .md

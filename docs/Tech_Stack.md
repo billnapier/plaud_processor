@@ -46,8 +46,9 @@ graph TD
        2. Downloads the file content.
        3. Executes the post-processing regex text cleanup.
        4. Classifies the content programmatically using rule-based/regex routing rules (Gemini API classification is planned for a future phase).
-       5. Moves the file to the target folder in Google Drive. Checks if target folder exists (to prevent duplicate folder creation) and checks if target file exists (appending an incrementing suffix `_1.md`, `_2.md` on collision to ensure uniqueness).
-       6. Releases/updates the Firestore state.
+       5. Renames the file based on the first H1 markdown heading (extracted as the first line starting with `# ` and sanitized of invalid characters like `/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`). If no H1 title exists, falls back to original filename processing (including date expansion for Journal notes). Suffixes are appended on collision.
+       6. Moves the file to the target folder in Google Drive.
+       7. Releases/updates the Firestore state.
    - **`POST /renew-watch`**
      * **Purpose:** Private endpoint triggered by Cloud Scheduler.
      * **Logic:** Establishes/renews the 24-hour Google Drive notification channel on the "Inbox" folder and stores the active `channelId` and `resourceId` in Firestore.
