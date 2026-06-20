@@ -222,6 +222,79 @@ function sanitizeFilename(name: string): string {
   return sanitized.trim();
 }
 
+/**
+ * Extracts a date (YYYY-MM-DD) from the first "timestamp: foo" line in markdown content.
+ */
+function extractDateFromContent(content: string): string | null {
+  const lines = content.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const match = trimmed.match(/^(?:-\s*)?timestamp:\s*(.+)$/i);
+    if (match) {
+      const val = match[1].trim().replace(/['"`]/g, '');
+
+      // Try numeric timestamp digits
+      if (/^\d+$/.test(val)) {
+        let num = parseInt(val, 10);
+        if (val.length === 10) {
+          num *= 1000;
+        }
+        const d = new Date(num);
+        if (!isNaN(d.getTime())) {
+          return d.toISOString().split('T')[0];
+        }
+      }
+
+      // Try standard Date parsing
+      const d = new Date(val);
+      if (!isNaN(d.getTime())) {
+        return d.toISOString().split('T')[0];
+      }
+
+      // Regex fallback for YYYY-MM-DD
+      const dateMatch = val.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+      if (dateMatch) {
+        return `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Extracts a date (YYYY-MM-DD) from the filename if it is a timestamp.
+ */
+function extractDateFromFilename(filename: string): string | null {
+  const nameWithoutExt = filename.replace(/\.md$/i, '').trim();
+
+  // Try numeric timestamp digits
+  if (/^\d+$/.test(nameWithoutExt)) {
+    let num = parseInt(nameWithoutExt, 10);
+    if (nameWithoutExt.length === 10) {
+      num *= 1000;
+    }
+    const d = new Date(num);
+    if (!isNaN(d.getTime())) {
+      return d.toISOString().split('T')[0];
+    }
+  }
+
+  // Try YYYY-MM-DD pattern
+  const dateRegexMatch = nameWithoutExt.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+  if (dateRegexMatch) {
+    return `${dateRegexMatch[1]}-${dateRegexMatch[2]}-${dateRegexMatch[3]}`;
+  }
+
+  // General date parsing fallback for filenames at least 8 chars long
+  const d = new Date(nameWithoutExt);
+  if (!isNaN(d.getTime()) && nameWithoutExt.length >= 8) {
+    return d.toISOString().split('T')[0];
+  }
+
+  return null;
+}
+
+
 
 interface RoutingResult {
   classification: string;
@@ -425,46 +498,61 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
         // Resolve target directory under Obsidian Vault
         const targetFolderId = await resolvePath(pathParts, vaultFolderId);
 
-        // Resolve filename: try to extract title from markdown content first
-        let targetFileName = '';
+        // Resolve base filename (extracted H1 title or fallback name)
+        let baseName = '';
         const markdownTitle = extractTitleFromContent(cleaned);
         if (markdownTitle) {
-          const sanitizedTitle = sanitizeFilename(markdownTitle);
-          if (sanitizedTitle.length > 0) {
-            targetFileName = `${sanitizedTitle}.md`;
-            console.log(`Renaming file using extracted title: "${markdownTitle}" -> "${targetFileName}"`);
-          }
-        }
-
-        // Fallback to original name/date logic if no markdown title was found
-        if (!targetFileName) {
-          targetFileName = file.name;
+          baseName = sanitizeFilename(markdownTitle);
+        } else {
+          // Fallback to original name without extension
+          let fallbackName = file.name.replace(/\.md$/, '').trim();
           if (classification === 'Journal') {
             const currentYear = new Date().getFullYear();
             const inlineDateRegex = /(?<!\d{4}-)\b(\d{2})-(\d{2})\b/g;
-            const tempName = targetFileName.replace(inlineDateRegex, `${currentYear}-$1-$2`);
+            const tempName = fallbackName.replace(inlineDateRegex, `${currentYear}-$1-$2`);
             const cleanTempName = tempName.trim();
-            if (!cleanTempName || cleanTempName === '.md' || cleanTempName.replace(/\.md$/, '').trim() === '') {
-              const formattedDate = new Date().toISOString().split('T')[0];
-              targetFileName = `${formattedDate} Journal Note.md`;
+            if (!cleanTempName || cleanTempName === '.md' || cleanTempName.trim() === '') {
+              baseName = 'Journal Note';
             } else {
-              targetFileName = tempName;
+              baseName = sanitizeFilename(tempName);
             }
+          } else {
+            baseName = sanitizeFilename(fallbackName);
           }
         }
 
-        // Filename Safeguard & Sanitization
-        let nameWithoutExt = targetFileName.replace(/\.md$/, '').trim();
-        if (!targetFileName || targetFileName === '.md' || nameWithoutExt === '') {
-          const timestamp = Date.now();
-          targetFileName = `Plaud Note ${timestamp}.md`;
-        } else {
-          // Sanitize the filename to remove disallowed characters
-          const sanitizedName = sanitizeFilename(nameWithoutExt);
-          targetFileName = `${sanitizedName}.md`;
+        // Safeguard for empty base name
+        if (!baseName) {
+          baseName = 'Plaud Note';
         }
 
-        // Normalize extension to .md
+        // Resolve date (from content, title prefix, filename, or current time)
+        let fileDate = extractDateFromContent(cleaned);
+        if (!fileDate) {
+          const baseNameDateMatch = baseName.match(/^(\d{4}-\d{2}-\d{2})\b/);
+          if (baseNameDateMatch) {
+            fileDate = baseNameDateMatch[1];
+          }
+        }
+        if (!fileDate) {
+          fileDate = extractDateFromFilename(file.name);
+        }
+        if (!fileDate) {
+          fileDate = new Date().toISOString().split('T')[0];
+        }
+
+        // Prepend date if not already at the start of baseName
+        let targetFileName = '';
+        const datePattern = fileDate.replace(/-/g, '');
+        if (baseName.startsWith(fileDate)) {
+          targetFileName = `${baseName}.md`;
+        } else if (baseName.startsWith(datePattern)) {
+          targetFileName = `${baseName}.md`;
+        } else {
+          targetFileName = `${fileDate} - ${baseName}.md`;
+        }
+
+        // Double check extension normalization
         if (!targetFileName.endsWith('.md')) {
           if (targetFileName.endsWith('.txt')) {
             targetFileName = targetFileName.substring(0, targetFileName.length - 4) + '.md';

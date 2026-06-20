@@ -197,14 +197,25 @@ graph TD
 * **Default Fallback:**
   * If none of the programmatic tags match, the file is routed to `Obsidian Vault/Unfiled`.
 
-### 5.2. Filename Resolution & Title Extraction
-1. **Title Extraction:** The worker scans the cleaned markdown content line by line to extract the first H1 heading (the first line starting with `# `).
-2. **Title Sanitization:** If an H1 title is found, it is sanitized to remove or replace invalid filename characters, and is used as the base filename (appended with `.md`).
-3. **Fallback Resolution:** If no H1 title is found in the content, the worker falls back to the original filename processing rules (including Journal date expansion where applicable).
+### 5.2. Filename Resolution, Date Extraction & Prepending
+All processed files are renamed to include a date prefix (`YYYY-MM-DD`) and a sanitized title (e.g. `YYYY-MM-DD - <Sanitized Title>.md`).
 
-### 5.3. Filename Safeguard & Sanitization
-* **Invalid Characters:** In all cases (both extracted titles and fallback/original filenames), the name is sanitized to ensure compatibility with Google Drive, Windows, Linux, and Obsidian Vault naming schemes. Slashes (`/` and `\`) are replaced with dashes (`-`), and other invalid characters (`:`, `*`, `?`, `"`, `<`, `>`, `|`) are removed.
-* **Empty File Name:** If the resulting filename is empty or resolves to `.md`, the worker renames the file to `Plaud Note <timestamp>.md`.
+1. **Date Resolution Hierarchy:**
+   The worker resolves the target date using the following priority queue:
+   * **Content Timestamp Tag:** Scans the content for a `timestamp: <value>` (or `- timestamp: <value>`) metadata line. This parses standard date strings, unix timestamps (seconds or milliseconds), or `YYYY-MM-DD` regex patterns.
+   * **H1 Title Prefix:** If the extracted H1 title already starts with a `YYYY-MM-DD` date pattern, that date is extracted and used.
+   * **Filename Timestamp/Date:** If the original filename is a numeric timestamp (unix epoch in seconds or milliseconds) or contains a `YYYY-MM-DD` string pattern, that date is resolved.
+   * **Current Date Fallback:** If none of the above are matched, it defaults to the current date in local time (`YYYY-MM-DD`).
+
+2. **Base Title Resolution:**
+   * **Title Extraction:** The worker scans the cleaned markdown content line by line to extract the first H1 heading (the first line starting with `# `).
+   * **Fallback to Original Filename:** If no H1 title is found, the worker falls back to the original filename without extension. For `#Journal` notes, inline date patterns like `MM-DD` are expanded to `YYYY-MM-DD` using the current year.
+   * **Default Fallback:** If the base title resolves to an empty string, it defaults to `Plaud Note`.
+
+3. **Sanitization & Assembly:**
+   * **Sanitization:** All base titles are sanitized to ensure compatibility with Google Drive, Windows, Linux, and Obsidian Vault naming schemes. Slashes (`/` and `\`) are replaced with dashes (`-`), other invalid characters (`:`, `*`, `?`, `"`, `<`, `>`, `|`) are removed, and consecutive whitespaces are collapsed.
+   * **Composition:** If the sanitized base title already starts with the resolved date (with or without dashes), it is used directly as `${baseName}.md`. Otherwise, the date is prepended to form `${fileDate} - ${baseName}.md`.
+   * **De-duplication:** If a file with the same name already exists in the target directory, an incrementing suffix (e.g., `_1`, `_2`) is appended to prevent naming conflicts.
 
 ---
 
