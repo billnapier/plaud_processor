@@ -123,41 +123,50 @@ Project tracking uses a flat-file database design powered by folder segregation,
 
 ### A. Project Hub Page Blueprint
 
-
-
-Each project is managed from a primary dashboard hub note. Because the Cloud Run routing engine handles subfolder routing, the inbox uses native, fast folder paths to track outstanding items:
+Each project is managed from a primary dashboard hub note. The note maps active tasks and update history dynamically using frontmatter variables and custom Obsidian plugin queries:
 
 ```yaml
 ---
 type: project-hub
 status: Active
-priority: High
-project-folder: portugal
+priority: Medium
+project-folder: 
 ---
 
-# 🇵🇹 Portugal Project Hub
+# 🚀 Project: `$= dv.current().file.name`
 
 ## 📥 Untriaged Project Inbox
 > [!info] These tasks were dictated via PLAUD and are waiting to be scheduled or moved during your weekly review.
 
 ```tasks
 not done
-path includes Project Updates/portugal
+path includes Project Updates/{{query.file.property('project-folder')}}
 no scheduled date
-
+short backlink
 ```
+
+## All Incomplete Tasks
+```tasks
+not done
+path includes Project Updates/{{query.file.property('project-folder')}}
+short backlink
+```
+
+---
 
 ## 📅 Chronological Update History
-
 ```dataview
 TABLE file.ctime AS "Date Dictated", summary AS "Key Focus"
-FROM "Transcripts/Project Updates/portugal"
+FROM "Project Updates"
+WHERE contains(file.path, this.project-folder)
 SORT file.ctime DESC
 LIMIT 15
-
 ```
 
+## Update Status
+[Contains Meta Bind Button blocks to Archive and Unarchive the project]
 ```
+
 
 ### B. Global Master Dashboard[cite: 1]
 To keep a birds-eye view of your entire operational landscape, a global dashboard aggregates metadata from individual project pages[cite: 1]:
@@ -205,3 +214,15 @@ Your weekly review triage operates entirely via friction-free inline metadata up
 
 
 * **Chronology Plugin:** Placed in the right-hand sidebar to provide a visual timeline layout of all document activity by date.
+
+### E. Project Archiving & Lifecycle Management
+
+To handle recurring projects (such as annual trips or repeating project names) and prevent historical notes or tasks from mixing with future iterations, the vault implements a local archiving protocol:
+
+1. **Physical Folder Archiving:** The active project folder (e.g., `/Project Updates/tennessee`) is suffix-renamed to include the current year (e.g., `/Project Updates/tennessee-2026`). All existing internal links to files inside this directory are preserved by Obsidian.
+2. **Metadata Freezing:** The project hub note's frontmatter properties are updated to set `status: Archived` and redirect the `project-folder` query path to the renamed directory.
+3. **Note Archiving:** The project hub note itself is renamed to include the year (e.g., `Tennessee 2026.md`) to finalize the archive.
+4. **Active Workspace Reset:** A new active note can then be cleanly created at the original path to start the next project cycle. The Cloud Run routing engine will automatically spin up a fresh, empty `/Project Updates/tennessee` folder the next time the active project tag is dictated.
+
+This lifecycle is automated via local Meta Bind action buttons embedded directly within the active project hub pages.
+
