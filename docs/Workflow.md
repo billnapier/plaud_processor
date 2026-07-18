@@ -123,41 +123,50 @@ Project tracking uses a flat-file database design powered by folder segregation,
 
 ### A. Project Hub Page Blueprint
 
-
-
-Each project is managed from a primary dashboard hub note. Because the Cloud Run routing engine handles subfolder routing, the inbox uses native, fast folder paths to track outstanding items:
+Each project is managed from a primary dashboard hub note. The note maps active tasks and update history dynamically using frontmatter variables and custom Obsidian plugin queries:
 
 ```yaml
 ---
 type: project-hub
 status: Active
-priority: High
-project-folder: portugal
+priority: Medium
+project-folder: 
 ---
 
-# 🇵🇹 Portugal Project Hub
+# 🚀 Project: `$= dv.current().file.name`
 
 ## 📥 Untriaged Project Inbox
 > [!info] These tasks were dictated via PLAUD and are waiting to be scheduled or moved during your weekly review.
 
 ```tasks
 not done
-path includes Project Updates/portugal
+path includes Project Updates/{{query.file.property('project-folder')}}
 no scheduled date
-
+short backlink
 ```
+
+## All Incomplete Tasks
+```tasks
+not done
+path includes Project Updates/{{query.file.property('project-folder')}}
+short backlink
+```
+
+---
 
 ## 📅 Chronological Update History
-
 ```dataview
 TABLE file.ctime AS "Date Dictated", summary AS "Key Focus"
-FROM "Transcripts/Project Updates/portugal"
+FROM "Project Updates"
+WHERE contains(file.path, this.project-folder)
 SORT file.ctime DESC
 LIMIT 15
-
 ```
 
+## Update Status
+[Contains Meta Bind Button blocks to Archive and Unarchive the project]
 ```
+
 
 ### B. Global Master Dashboard[cite: 1]
 To keep a birds-eye view of your entire operational landscape, a global dashboard aggregates metadata from individual project pages[cite: 1]:
