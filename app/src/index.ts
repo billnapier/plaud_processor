@@ -361,6 +361,109 @@ app.get('/health', (req: Request, res: Response) => {
   res.status(200).send('OK');
 });
 
+/**
+ * Helper to initialize and return the Gmail OAuth2 client.
+ */
+function getGmailOAuth2Client(): any {
+  const clientId = process.env.GMAIL_CLIENT_ID;
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET;
+  const domain = process.env.DOMAIN_NAME || 'plaud.billnapier.com';
+  const redirectUri = `https://${domain}/auth/gmail/callback`;
+
+  if (!clientId || !clientSecret) {
+    throw new Error('GMAIL_CLIENT_ID or GMAIL_CLIENT_SECRET environment variable is missing');
+  }
+
+  return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+}
+
+// GET /auth/gmail - Redirect to Google consent screen
+app.get('/auth/gmail', (req: Request, res: Response) => {
+  try {
+    const oauth2Client = getGmailOAuth2Client();
+    const scopes = [
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.modify',
+    ];
+    const authUrl = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: scopes,
+      prompt: 'consent',
+    });
+    res.redirect(authUrl);
+  } catch (error: any) {
+    console.error('Failed to generate Gmail auth URL:', error);
+    res.status(500).send(`Error: ${error.message || String(error)}`);
+  }
+});
+
+// GET /auth/gmail/callback - Handle the OAuth 2.0 redirect
+app.get('/auth/gmail/callback', async (req: Request, res: Response) => {
+  const code = req.query.code as string;
+  if (!code) {
+    res.status(400).send('Missing authorization code');
+    return;
+  }
+
+  try {
+    const oauth2Client = getGmailOAuth2Client();
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const profileResponse = await gmail.users.getProfile({ userId: 'me' });
+    const emailAddress = profileResponse.data.emailAddress;
+
+    if (!emailAddress) {
+      console.error('Failed to retrieve user email profile');
+      res.status(400).send('Unable to retrieve user email profile from Gmail API');
+      return;
+    }
+
+    const allowedEmail = process.env.ALLOWED_EMAIL;
+    if (!allowedEmail) {
+      console.error('ALLOWED_EMAIL environment variable is not defined');
+      res.status(500).send('Server configuration error: ALLOWED_EMAIL is not set');
+      return;
+    }
+
+    if (emailAddress.toLowerCase() !== allowedEmail.toLowerCase()) {
+      console.warn(`Unauthorized login attempt by: ${emailAddress} (Expected: ${allowedEmail})`);
+      res.status(403).send('Forbidden: Email is not authorized.');
+      return;
+    }
+
+    if (!tokens.refresh_token) {
+      console.error('No refresh token returned in OAuth exchange.');
+      res.status(400).send('Failed to obtain a refresh token. Please try again and ensure consent is granted.');
+      return;
+    }
+
+    // Initialize Secret Manager client
+    const secretManagerAuth = new google.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    });
+    const secretmanager = google.secretmanager({ version: 'v1', auth: secretManagerAuth });
+    const projectId = process.env.PROJECT_ID || await secretManagerAuth.getProjectId();
+
+    console.log(`Writing Gmail refresh token to Secret Manager for project: ${projectId}`);
+    await secretmanager.projects.secrets.addVersion({
+      parent: `projects/${projectId}/secrets/GMAIL_USER_REFRESH_TOKEN`,
+      requestBody: {
+        payload: {
+          data: Buffer.from(tokens.refresh_token).toString('base64'),
+        },
+      },
+    });
+
+    console.log('Successfully saved GMAIL_USER_REFRESH_TOKEN to Secret Manager');
+    res.status(200).send('Gmail authentication setup complete. You can now close this window.');
+  } catch (error: any) {
+    console.error('Failed to complete Gmail authentication callback:', error);
+    res.status(500).send(`Error: ${error.message || String(error)}`);
+  }
+});
+
 // POST /webhook (Public, called by Google Drive Push Notification)
 app.post('/webhook', async (req: Request, res: Response) => {
   console.log('Received webhook headers:', req.headers);
