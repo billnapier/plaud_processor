@@ -377,6 +377,32 @@ function getGmailOAuth2Client(): any {
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
+/**
+ * Resolves a Gmail label ID by name. If the label does not exist, it creates it.
+ */
+async function getOrCreateGmailLabel(gmail: any, labelName: string): Promise<string> {
+  const response = await gmail.users.labels.list({ userId: 'me' });
+  const labels = response.data.labels || [];
+  const foundLabel = labels.find((l: any) => l.name?.toLowerCase() === labelName.toLowerCase());
+
+  if (foundLabel) {
+    console.log(`Found existing Gmail label "${labelName}" with ID: ${foundLabel.id}`);
+    return foundLabel.id;
+  }
+
+  console.log(`Gmail label "${labelName}" not found. Creating it...`);
+  const createResponse = await gmail.users.labels.create({
+    userId: 'me',
+    requestBody: {
+      name: labelName,
+      labelListVisibility: 'labelShow',
+      messageListVisibility: 'show',
+    },
+  });
+  console.log(`Successfully created Gmail label "${labelName}" with ID: ${createResponse.data.id}`);
+  return createResponse.data.id!;
+}
+
 // GET /auth/gmail - Redirect to Google consent screen
 app.get('/auth/gmail', (req: Request, res: Response) => {
   try {
@@ -811,6 +837,41 @@ app.post('/renew-watch', async (req: Request, res: Response) => {
       console.log('Successfully published scheduled fallback event to Pub/Sub.');
     } catch (triggerError: any) {
       console.error('Failed to publish scheduled fallback event to Pub/Sub (non-fatal):', triggerError);
+    }
+
+    // Gmail Inbox Watch Renewal & Label Inception (Stage 4)
+    try {
+      const gmailRefreshToken = process.env.GMAIL_USER_REFRESH_TOKEN;
+      if (!gmailRefreshToken || gmailRefreshToken === 'PLACEHOLDER' || gmailRefreshToken.trim() === '') {
+        console.warn('GMAIL_USER_REFRESH_TOKEN is not set or is empty. Skipping Gmail watch renewal.');
+      } else {
+        console.log('Initializing Gmail client for watch renewal...');
+        const oauth2Client = getGmailOAuth2Client();
+        oauth2Client.setCredentials({ refresh_token: gmailRefreshToken });
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+        const labelId = await getOrCreateGmailLabel(gmail, '!to-obsidian');
+
+        const projectId = process.env.PROJECT_ID;
+        if (!projectId) {
+          throw new Error('PROJECT_ID environment variable is missing');
+        }
+
+        console.log(`Setting up Gmail watch for topic: projects/${projectId}/topics/gmail-inbox-updates and label ID: ${labelId}`);
+        const gmailWatchResponse = await gmail.users.watch({
+          userId: 'me',
+          requestBody: {
+            topicName: `projects/${projectId}/topics/gmail-inbox-updates`,
+            labelIds: [labelId],
+            labelFilterBehavior: 'INCLUDE',
+          },
+        });
+
+        console.log('Gmail watch renewed successfully:', gmailWatchResponse.data);
+        console.log(`Gmail watch historyId: ${gmailWatchResponse.data.historyId}, expiration: ${gmailWatchResponse.data.expiration}`);
+      }
+    } catch (gmailError: any) {
+      console.error('Failed to renew Gmail watch (non-fatal):', gmailError);
     }
 
     res.status(200).send('Watch renewal and fallback trigger completed');
