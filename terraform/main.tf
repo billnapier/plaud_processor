@@ -191,7 +191,9 @@ resource "google_cloud_run_v2_service" "default" {
     google_project_service.run_api,
     google_project_service.firestore_api,
     google_project_service.secretmanager_api,
-    google_artifact_registry_repository.repo
+    google_artifact_registry_repository.repo,
+    google_secret_manager_secret_iam_member.app_runner_secret_accessor,
+    google_secret_manager_secret_iam_member.app_runner_secret_version_adder
   ]
 }
 
