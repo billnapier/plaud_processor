@@ -372,8 +372,10 @@ function getGmailOAuth2Client(req?: Request): any {
   
   let redirectUri = '';
   if (req) {
-    const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
-    const host = req.get('host');
+    const rawProto = (req.headers['x-forwarded-proto'] as string) || (req.secure ? 'https' : 'http');
+    const protocol = rawProto.split(',')[0].trim();
+    const rawHost = (req.headers['x-forwarded-host'] as string) || req.get('host') || 'plaud.billnapier.com';
+    const host = rawHost.split(',')[0].trim();
     redirectUri = `${protocol}://${host}/auth/gmail/callback`;
   } else {
     const domain = process.env.DOMAIN_NAME || 'plaud.billnapier.com';
