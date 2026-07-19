@@ -78,9 +78,9 @@ async function verifyOidcToken(req: Request): Promise<boolean> {
 /**
  * Finds a folder ID by name. Throws an error if not found.
  */
-async function getRootFolder(folderName: string): Promise<string> {
+async function getRootFolder(folderName: string, driveClient = drive): Promise<string> {
   const query = `mimeType = 'application/vnd.google-apps.folder' and name = '${folderName.replace(/'/g, "\\'")}' and trashed = false`;
-  const response = await drive.files.list({
+  const response = await driveClient.files.list({
     q: query,
     fields: 'files(id, name, owners)',
     spaces: 'drive',
@@ -422,6 +422,7 @@ app.get('/auth/gmail', (req: Request, res: Response) => {
     const scopes = [
       'https://www.googleapis.com/auth/gmail.readonly',
       'https://www.googleapis.com/auth/gmail.modify',
+      'https://www.googleapis.com/auth/drive.file',
     ];
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
@@ -791,6 +792,7 @@ app.post('/webhooks/gmail', async (req: Request, res: Response) => {
     const oauth2Client = getGmailOAuth2Client();
     oauth2Client.setCredentials({ refresh_token: gmailRefreshToken });
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const userDrive = google.drive({ version: 'v3', auth: oauth2Client });
 
     // Query for messages with the !to-obsidian label
     const listResponse = await gmail.users.messages.list({
@@ -803,7 +805,7 @@ app.post('/webhooks/gmail', async (req: Request, res: Response) => {
 
     // Resolve dependencies outside the loop to optimize performance and prevent rate limit issues
     const stagingFolderName = process.env.STAGING_FOLDER_NAME || 'Obsidian Staging';
-    const stagingFolderId = await getRootFolder(stagingFolderName);
+    const stagingFolderId = await getRootFolder(stagingFolderName, userDrive);
 
     const toObsidianLabelId = await getOrCreateGmailLabel(gmail, '!to-obsidian');
     const processedToObsidianLabelId = await getOrCreateGmailLabel(gmail, 'processed-to-obsidian');
@@ -972,7 +974,7 @@ ${hashtags}
         let driveFileId = lockResult.driveFileId;
         if (!driveFileId) {
           console.log(`Writing note to staging folder for message: ${messageId}`);
-          const driveResponse = await drive.files.create({
+          const driveResponse = await userDrive.files.create({
             requestBody: {
               name: `gmail-capture-${messageId}.md`,
               parents: [stagingFolderId],
