@@ -791,6 +791,19 @@ app.post('/webhooks/gmail', async (req: Request, res: Response) => {
     const messages = listResponse.data.messages || [];
     console.log(`Found ${messages.length} messages with label "!to-obsidian"`);
 
+    // Resolve dependencies outside the loop to optimize performance and prevent rate limit issues
+    const stagingFolderName = process.env.STAGING_FOLDER_NAME || 'Obsidian Staging';
+    const stagingFolderId = await getRootFolder(stagingFolderName);
+
+    const toObsidianLabelId = await getOrCreateGmailLabel(gmail, '!to-obsidian');
+    const processedToObsidianLabelId = await getOrCreateGmailLabel(gmail, 'processed-to-obsidian');
+
+    const ai = new GoogleGenAI({
+      vertexai: true,
+      project: process.env.PROJECT_ID,
+      location: process.env.GCP_REGION || 'us-central1',
+    });
+
     for (const msg of messages) {
       const messageId = msg.id;
       if (!messageId) continue;
@@ -798,7 +811,7 @@ app.post('/webhooks/gmail', async (req: Request, res: Response) => {
       const emailRef = db.collection('processed_emails').doc(messageId);
 
       // Acquire distributed lock via transaction
-      const shouldProcess = await db.runTransaction(async (transaction) => {
+      const lockResult = await db.runTransaction(async (transaction) => {
         const doc = await transaction.get(emailRef);
         const now = new Date();
         if (doc.exists) {
@@ -806,13 +819,13 @@ app.post('/webhooks/gmail', async (req: Request, res: Response) => {
           if (data) {
             if (data.status === 'completed') {
               console.log(`Email lock check: ${messageId} is already marked as completed.`);
-              return false;
+              return { shouldProcess: false, driveFileId: data.driveFileId };
             }
             if (data.status === 'processing') {
               const lockedAt = data.lockedAt?.toDate();
               if (lockedAt && (now.getTime() - lockedAt.getTime()) < 15 * 60 * 1000) {
                 console.log(`Email lock check: ${messageId} is currently being processed.`);
-                return false;
+                return { shouldProcess: false };
               } else {
                 console.log(`Email lock check: ${messageId} lock expired. Re-acquiring lock.`);
               }
@@ -823,10 +836,10 @@ app.post('/webhooks/gmail', async (req: Request, res: Response) => {
           status: 'processing',
           lockedAt: now,
         }, { merge: true });
-        return true;
+        return { shouldProcess: true, driveFileId: doc.exists ? doc.data()?.driveFileId : undefined };
       });
 
-      if (!shouldProcess) {
+      if (!lockResult.shouldProcess) {
         continue;
       }
 
@@ -850,17 +863,10 @@ app.post('/webhooks/gmail', async (req: Request, res: Response) => {
 
         const subject = parsedEmail.subject || 'No Subject';
         const senderText = parsedEmail.from?.text || 'Unknown Sender';
-        const dateObj = parsedEmail.date || new Date();
+        const dateObj = (parsedEmail.date && !isNaN(parsedEmail.date.getTime())) ? parsedEmail.date : new Date();
         const dateStr = dateObj.toISOString().split('T')[0];
         const bodyText = parsedEmail.text || '';
         const threadId = messageResponse.data.threadId || msg.threadId || '';
-
-        // Initialize Vertex AI Gemini SDK
-        const ai = new GoogleGenAI({
-          vertexai: true,
-          project: process.env.PROJECT_ID,
-          location: process.env.GCP_REGION || 'us-central1',
-        });
 
         const prompt = `You are an expert personal data assistant. Analyze the following raw email payload. Extract a concise summary of the email, extract all actionable TODO items or tasks, determine the matching tags for classification, and convert the core body into clean, semantic Markdown. Return your response matching the requested JSON schema exactly.
 
@@ -871,21 +877,21 @@ Body:
 ${bodyText}`;
 
         const responseSchema = {
-          type: 'OBJECT',
+          type: 'object',
           properties: {
-            summary: { type: 'STRING', description: 'A concise 2-3 sentence summary of the email context.' },
+            summary: { type: 'string', description: 'A concise 2-3 sentence summary of the email context.' },
             tasks: {
-              type: 'ARRAY',
-              items: { type: 'STRING' },
+              type: 'array',
+              items: { type: 'string' },
               description: 'Action items or todo tasks extracted from the email body.',
             },
             tags: {
-              type: 'ARRAY',
-              items: { type: 'STRING' },
+              type: 'array',
+              items: { type: 'string' },
               description: 'Extracted topics or folders. Example: project/updates, Journal, Project, ProjectPlan',
             },
             cleanMarkdown: {
-              type: 'STRING',
+              type: 'string',
               description: 'The email body converted to clean, reader-friendly Markdown.',
             },
           },
@@ -918,8 +924,11 @@ ${bodyText}`;
           tasksSection = tasks.map((t: string) => `- [ ] ${t}`).join('\n');
         }
 
-        // Format tags as hashtags
-        const hashtags = tags.map((t: string) => `#${t.startsWith('#') ? t.substring(1) : t}`).join(' ');
+        // Format tags as hashtags, sanitizing any spaces
+        const hashtags = tags.map((t: string) => {
+          const cleanTag = t.replace(/\s+/g, '-');
+          return `#${cleanTag.startsWith('#') ? cleanTag.substring(1) : cleanTag}`;
+        }).join(' ');
 
         const compiledMarkdown = `---
 type: email-capture
@@ -949,25 +958,28 @@ ${cleanMarkdown}
 ${hashtags}
 `;
 
-        const stagingFolderName = process.env.STAGING_FOLDER_NAME || 'Obsidian Staging';
-        const stagingFolderId = await getRootFolder(stagingFolderName);
-
-        console.log(`Writing note to staging folder for message: ${messageId}`);
-        await drive.files.create({
-          requestBody: {
-            name: `gmail-capture-${messageId}.md`,
-            parents: [stagingFolderId],
-            mimeType: 'text/markdown',
-          },
-          media: {
-            mimeType: 'text/markdown',
-            body: compiledMarkdown,
-          },
-        });
-
-        // Swap labels: remove "!to-obsidian" and add "processed-to-obsidian"
-        const toObsidianLabelId = await getOrCreateGmailLabel(gmail, '!to-obsidian');
-        const processedToObsidianLabelId = await getOrCreateGmailLabel(gmail, 'processed-to-obsidian');
+        // Check if the file was already created in a previous failed run using driveFileId
+        let driveFileId = lockResult.driveFileId;
+        if (!driveFileId) {
+          console.log(`Writing note to staging folder for message: ${messageId}`);
+          const driveResponse = await drive.files.create({
+            requestBody: {
+              name: `gmail-capture-${messageId}.md`,
+              parents: [stagingFolderId],
+              mimeType: 'text/markdown',
+            },
+            media: {
+              mimeType: 'text/markdown',
+              body: compiledMarkdown,
+            },
+          });
+          driveFileId = driveResponse.data.id || undefined;
+          if (driveFileId) {
+            await emailRef.set({ driveFileId }, { merge: true });
+          }
+        } else {
+          console.log(`File already created in previous run: ${driveFileId}. Skipping file creation.`);
+        }
 
         console.log(`Swapping labels for message: ${messageId}`);
         await gmail.users.messages.modify({
