@@ -56,6 +56,41 @@ resource "google_project_service" "firestore_api" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "secretmanager_api" {
+  service            = "secretmanager.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "aiplatform_api" {
+  service            = "aiplatform.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_secret_manager_secret" "gmail_client_id" {
+  secret_id = "GMAIL_CLIENT_ID"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.secretmanager_api]
+}
+
+resource "google_secret_manager_secret" "gmail_client_secret" {
+  secret_id = "GMAIL_CLIENT_SECRET"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.secretmanager_api]
+}
+
+resource "google_secret_manager_secret" "gmail_user_refresh_token" {
+  secret_id = "GMAIL_USER_REFRESH_TOKEN"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.secretmanager_api]
+}
+
+
 # Artifact Registry Repository
 resource "google_artifact_registry_repository" "repo" {
   location      = var.region
@@ -107,6 +142,37 @@ resource "google_cloud_run_v2_service" "default" {
         name  = "DOMAIN_NAME"
         value = var.domain_name
       }
+      env {
+        name  = "ALLOWED_EMAIL"
+        value = var.allowed_email
+      }
+      env {
+        name = "GMAIL_CLIENT_ID"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.gmail_client_id.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "GMAIL_CLIENT_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.gmail_client_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "GMAIL_USER_REFRESH_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.gmail_user_refresh_token.secret_id
+            version = "latest"
+          }
+        }
+      }
     }
   }
 
@@ -124,6 +190,7 @@ resource "google_cloud_run_v2_service" "default" {
   depends_on = [
     google_project_service.run_api,
     google_project_service.firestore_api,
+    google_project_service.secretmanager_api,
     google_artifact_registry_repository.repo
   ]
 }

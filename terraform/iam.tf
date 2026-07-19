@@ -141,6 +141,30 @@ resource "google_project_iam_member" "app_runner_pubsub" {
   member  = "serviceAccount:${google_service_account.app_runner.email}"
 }
 
+resource "google_secret_manager_secret_iam_member" "app_runner_secret_accessor" {
+  for_each  = toset([
+    google_secret_manager_secret.gmail_client_id.id,
+    google_secret_manager_secret.gmail_client_secret.id,
+    google_secret_manager_secret.gmail_user_refresh_token.id
+  ])
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.app_runner.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "app_runner_secret_version_adder" {
+  secret_id = google_secret_manager_secret.gmail_user_refresh_token.id
+  role      = "roles/secretmanager.secretVersionAdder"
+  member    = "serviceAccount:${google_service_account.app_runner.email}"
+}
+
+resource "google_project_iam_member" "app_runner_vertex_ai" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.app_runner.email}"
+}
+
+
 # Pub/Sub Invoker Service Account
 resource "google_service_account" "pubsub_invoker" {
   account_id   = "pubsub-invoker"

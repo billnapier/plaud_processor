@@ -35,3 +35,9 @@ variable "domain_name" {
   description = "Domain name to map to the Cloud Run service"
   type        = string
 }
+
+variable "allowed_email" {
+  description = "The Gmail email address allowed to complete the OAuth handshake"
+  type        = string
+}
+

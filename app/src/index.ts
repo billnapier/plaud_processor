@@ -4,6 +4,8 @@ import { Firestore } from '@google-cloud/firestore';
 import { PubSub } from '@google-cloud/pubsub';
 import { v4 as uuidv4 } from 'uuid';
 import { OAuth2Client } from 'google-auth-library';
+import { simpleParser } from 'mailparser';
+import { GoogleGenAI } from '@google/genai';
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -361,6 +363,135 @@ app.get('/health', (req: Request, res: Response) => {
   res.status(200).send('OK');
 });
 
+/**
+ * Helper to initialize and return the Gmail OAuth2 client.
+ */
+function getGmailOAuth2Client(): any {
+  const clientId = process.env.GMAIL_CLIENT_ID;
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET;
+  const domain = process.env.DOMAIN_NAME || 'plaud.billnapier.com';
+  const redirectUri = `https://${domain}/auth/gmail/callback`;
+
+  if (!clientId || !clientSecret) {
+    throw new Error('GMAIL_CLIENT_ID or GMAIL_CLIENT_SECRET environment variable is missing');
+  }
+
+  return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+}
+
+/**
+ * Resolves a Gmail label ID by name. If the label does not exist, it creates it.
+ */
+async function getOrCreateGmailLabel(gmail: any, labelName: string): Promise<string> {
+  const response = await gmail.users.labels.list({ userId: 'me' });
+  const labels = response.data.labels || [];
+  const foundLabel = labels.find((l: any) => l.name?.toLowerCase() === labelName.toLowerCase());
+
+  if (foundLabel) {
+    console.log(`Found existing Gmail label "${labelName}" with ID: ${foundLabel.id}`);
+    return foundLabel.id;
+  }
+
+  console.log(`Gmail label "${labelName}" not found. Creating it...`);
+  const createResponse = await gmail.users.labels.create({
+    userId: 'me',
+    requestBody: {
+      name: labelName,
+      labelListVisibility: 'labelShow',
+      messageListVisibility: 'show',
+    },
+  });
+  console.log(`Successfully created Gmail label "${labelName}" with ID: ${createResponse.data.id}`);
+  return createResponse.data.id!;
+}
+
+// GET /auth/gmail - Redirect to Google consent screen
+app.get('/auth/gmail', (req: Request, res: Response) => {
+  try {
+    const oauth2Client = getGmailOAuth2Client();
+    const scopes = [
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.modify',
+    ];
+    const authUrl = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: scopes,
+      prompt: 'consent',
+    });
+    res.redirect(authUrl);
+  } catch (error: any) {
+    console.error('Failed to generate Gmail auth URL:', error);
+    res.status(500).send(`Error: ${error.message || String(error)}`);
+  }
+});
+
+// GET /auth/gmail/callback - Handle the OAuth 2.0 redirect
+app.get('/auth/gmail/callback', async (req: Request, res: Response) => {
+  const code = req.query.code as string;
+  if (!code) {
+    res.status(400).send('Missing authorization code');
+    return;
+  }
+
+  try {
+    const oauth2Client = getGmailOAuth2Client();
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const profileResponse = await gmail.users.getProfile({ userId: 'me' });
+    const emailAddress = profileResponse.data.emailAddress;
+
+    if (!emailAddress) {
+      console.error('Failed to retrieve user email profile');
+      res.status(400).send('Unable to retrieve user email profile from Gmail API');
+      return;
+    }
+
+    const allowedEmail = process.env.ALLOWED_EMAIL;
+    if (!allowedEmail) {
+      console.error('ALLOWED_EMAIL environment variable is not defined');
+      res.status(500).send('Server configuration error: ALLOWED_EMAIL is not set');
+      return;
+    }
+
+    if (emailAddress.toLowerCase() !== allowedEmail.toLowerCase()) {
+      console.warn(`Unauthorized login attempt by: ${emailAddress} (Expected: ${allowedEmail})`);
+      res.status(403).send('Forbidden: Email is not authorized.');
+      return;
+    }
+
+    if (!tokens.refresh_token) {
+      console.error('No refresh token returned in OAuth exchange.');
+      res.status(400).send('Failed to obtain a refresh token. Please try again and ensure consent is granted.');
+      return;
+    }
+
+    // Initialize Secret Manager client
+    const secretManagerAuth = new google.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    });
+    const secretmanager = google.secretmanager({ version: 'v1', auth: secretManagerAuth });
+    const projectId = process.env.PROJECT_ID || await secretManagerAuth.getProjectId();
+
+    console.log(`Writing Gmail refresh token to Secret Manager for project: ${projectId}`);
+    await secretmanager.projects.secrets.addVersion({
+      parent: `projects/${projectId}/secrets/GMAIL_USER_REFRESH_TOKEN`,
+      requestBody: {
+        payload: {
+          data: Buffer.from(tokens.refresh_token).toString('base64'),
+        },
+      },
+    });
+
+    console.log('Successfully saved GMAIL_USER_REFRESH_TOKEN to Secret Manager');
+    res.status(200).send('Gmail authentication setup complete. You can now close this window.');
+  } catch (error: any) {
+    console.error('Failed to complete Gmail authentication callback:', error);
+    res.status(500).send(`Error: ${error.message || String(error)}`);
+  }
+});
+
 // POST /webhook (Public, called by Google Drive Push Notification)
 app.post('/webhook', async (req: Request, res: Response) => {
   console.log('Received webhook headers:', req.headers);
@@ -629,6 +760,262 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
   }
 });
 
+// POST /webhooks/gmail (Private, triggered by Pub/Sub Push subscription)
+app.post('/webhooks/gmail', async (req: Request, res: Response) => {
+  console.log('Gmail webhook triggered. Body:', req.body);
+
+  const isAuthorized = await verifyOidcToken(req);
+  if (!isAuthorized) {
+    res.status(401).send('Unauthorized');
+    return;
+  }
+
+  try {
+    const gmailRefreshToken = process.env.GMAIL_USER_REFRESH_TOKEN;
+    if (!gmailRefreshToken || gmailRefreshToken === 'PLACEHOLDER' || gmailRefreshToken.trim() === '') {
+      console.error('GMAIL_USER_REFRESH_TOKEN is not set or is empty');
+      res.status(500).send('Gmail client refresh token is missing');
+      return;
+    }
+
+    const oauth2Client = getGmailOAuth2Client();
+    oauth2Client.setCredentials({ refresh_token: gmailRefreshToken });
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+    // Query for messages with the !to-obsidian label
+    const listResponse = await gmail.users.messages.list({
+      userId: 'me',
+      q: 'label:!to-obsidian',
+    });
+
+    const messages = listResponse.data.messages || [];
+    console.log(`Found ${messages.length} messages with label "!to-obsidian"`);
+
+    // Resolve dependencies outside the loop to optimize performance and prevent rate limit issues
+    const stagingFolderName = process.env.STAGING_FOLDER_NAME || 'Obsidian Staging';
+    const stagingFolderId = await getRootFolder(stagingFolderName);
+
+    const toObsidianLabelId = await getOrCreateGmailLabel(gmail, '!to-obsidian');
+    const processedToObsidianLabelId = await getOrCreateGmailLabel(gmail, 'processed-to-obsidian');
+
+    const ai = new GoogleGenAI({
+      vertexai: true,
+      project: process.env.PROJECT_ID,
+      location: process.env.GCP_REGION || 'us-central1',
+    });
+
+    for (const msg of messages) {
+      const messageId = msg.id;
+      if (!messageId) continue;
+
+      const emailRef = db.collection('processed_emails').doc(messageId);
+
+      // Acquire distributed lock via transaction
+      const lockResult = await db.runTransaction(async (transaction) => {
+        const doc = await transaction.get(emailRef);
+        const now = new Date();
+        if (doc.exists) {
+          const data = doc.data();
+          if (data) {
+            if (data.status === 'completed') {
+              console.log(`Email lock check: ${messageId} is already marked as completed.`);
+              return { shouldProcess: false, driveFileId: data.driveFileId };
+            }
+            if (data.status === 'processing') {
+              const lockedAt = data.lockedAt?.toDate();
+              if (lockedAt && (now.getTime() - lockedAt.getTime()) < 15 * 60 * 1000) {
+                console.log(`Email lock check: ${messageId} is currently being processed.`);
+                return { shouldProcess: false };
+              } else {
+                console.log(`Email lock check: ${messageId} lock expired. Re-acquiring lock.`);
+              }
+            }
+          }
+        }
+        transaction.set(emailRef, {
+          status: 'processing',
+          lockedAt: now,
+        }, { merge: true });
+        return { shouldProcess: true, driveFileId: doc.exists ? doc.data()?.driveFileId : undefined };
+      });
+
+      if (!lockResult.shouldProcess) {
+        continue;
+      }
+
+      console.log(`Processing email message: ${messageId}`);
+
+      try {
+        // Fetch raw email RFC 822 content
+        const messageResponse = await gmail.users.messages.get({
+          userId: 'me',
+          id: messageId,
+          format: 'raw',
+        });
+
+        const rawBase64 = messageResponse.data.raw;
+        if (!rawBase64) {
+          throw new Error('Email raw content is empty');
+        }
+
+        const rawBuffer = Buffer.from(rawBase64, 'base64url');
+        const parsedEmail = await simpleParser(rawBuffer);
+
+        const subject = parsedEmail.subject || 'No Subject';
+        const senderText = parsedEmail.from?.text || 'Unknown Sender';
+        const dateObj = (parsedEmail.date && !isNaN(parsedEmail.date.getTime())) ? parsedEmail.date : new Date();
+        const dateStr = dateObj.toISOString().split('T')[0];
+        const bodyText = parsedEmail.text || '';
+        const threadId = messageResponse.data.threadId || msg.threadId || '';
+
+        const prompt = `You are an expert personal data assistant. Analyze the following raw email payload. Extract a concise summary of the email, extract all actionable TODO items or tasks, determine the matching tags for classification, and convert the core body into clean, semantic Markdown. Return your response matching the requested JSON schema exactly.
+
+Sender: ${senderText}
+Subject: ${subject}
+Date: ${dateStr}
+Body:
+${bodyText}`;
+
+        const responseSchema = {
+          type: 'object',
+          properties: {
+            summary: { type: 'string', description: 'A concise 2-3 sentence summary of the email context.' },
+            tasks: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Action items or todo tasks extracted from the email body.',
+            },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Extracted topics or folders. Example: project/updates, Journal, Project, ProjectPlan',
+            },
+            cleanMarkdown: {
+              type: 'string',
+              description: 'The email body converted to clean, reader-friendly Markdown.',
+            },
+          },
+          required: ['summary', 'tasks', 'tags', 'cleanMarkdown'],
+        };
+
+        console.log(`Querying Gemini 1.5 Flash for message: ${messageId}`);
+        const geminiResponse = await ai.models.generateContent({
+          model: 'gemini-1.5-flash',
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: responseSchema as any,
+          },
+        });
+
+        const geminiText = geminiResponse.text;
+        if (!geminiText) {
+          throw new Error('Gemini returned an empty response');
+        }
+
+        const result = JSON.parse(geminiText);
+        const summary = result.summary || '';
+        const tasks = result.tasks || [];
+        const tags = result.tags || [];
+        const cleanMarkdown = result.cleanMarkdown || '';
+
+        let tasksSection = '';
+        if (tasks && tasks.length > 0) {
+          tasksSection = tasks.map((t: string) => `- [ ] ${t}`).join('\n');
+        }
+
+        // Format tags as hashtags, sanitizing any spaces
+        const hashtags = tags.map((t: string) => {
+          const cleanTag = t.replace(/\s+/g, '-');
+          return `#${cleanTag.startsWith('#') ? cleanTag.substring(1) : cleanTag}`;
+        }).join(' ');
+
+        const compiledMarkdown = `---
+type: email-capture
+sender: "${senderText.replace(/"/g, '\\"')}"
+subject: "${subject.replace(/"/g, '\\"')}"
+timestamp: "${dateStr}"
+email-link: "https://mail.google.com/mail/u/0/#all/${threadId}"
+---
+
+# ${subject}
+
+## 📧 Email Details
+- **Sender:** ${senderText}
+- **Date:** ${dateStr}
+- **Link:** [View in Gmail](https://mail.google.com/mail/u/0/#all/${threadId})
+
+## 📝 Summary
+${summary}
+
+## ⏳ Action Items
+${tasksSection}
+
+---
+
+${cleanMarkdown}
+
+${hashtags}
+`;
+
+        // Check if the file was already created in a previous failed run using driveFileId
+        let driveFileId = lockResult.driveFileId;
+        if (!driveFileId) {
+          console.log(`Writing note to staging folder for message: ${messageId}`);
+          const driveResponse = await drive.files.create({
+            requestBody: {
+              name: `gmail-capture-${messageId}.md`,
+              parents: [stagingFolderId],
+              mimeType: 'text/markdown',
+            },
+            media: {
+              mimeType: 'text/markdown',
+              body: compiledMarkdown,
+            },
+          });
+          driveFileId = driveResponse.data.id || undefined;
+          if (driveFileId) {
+            await emailRef.set({ driveFileId }, { merge: true });
+          }
+        } else {
+          console.log(`File already created in previous run: ${driveFileId}. Skipping file creation.`);
+        }
+
+        console.log(`Swapping labels for message: ${messageId}`);
+        await gmail.users.messages.modify({
+          userId: 'me',
+          id: messageId,
+          requestBody: {
+            removeLabelIds: [toObsidianLabelId],
+            addLabelIds: [processedToObsidianLabelId],
+          },
+        });
+
+        // Set Firestore status to completed
+        await emailRef.set({
+          status: 'completed',
+          subject: subject,
+          completedAt: new Date(),
+        }, { merge: true });
+
+        console.log(`Successfully completed processing message: ${messageId}`);
+      } catch (msgError: any) {
+        console.error(`Failed to process message ${messageId}:`, msgError);
+        await emailRef.set({
+          status: 'failed',
+          error: msgError.message || String(msgError),
+          completedAt: new Date(),
+        }, { merge: true });
+      }
+    }
+
+    res.status(200).send('Gmail updates processed successfully');
+  } catch (error: any) {
+    console.error('Error processing Gmail webhook:', error);
+    res.status(500).send(`Error processing Gmail webhook: ${error.message || String(error)}`);
+  }
+});
+
 // POST /renew-watch (Private, triggered by Cloud Scheduler)
 app.post('/renew-watch', async (req: Request, res: Response) => {
   console.log('Renew watch triggered');
@@ -708,6 +1095,41 @@ app.post('/renew-watch', async (req: Request, res: Response) => {
       console.log('Successfully published scheduled fallback event to Pub/Sub.');
     } catch (triggerError: any) {
       console.error('Failed to publish scheduled fallback event to Pub/Sub (non-fatal):', triggerError);
+    }
+
+    // Gmail Inbox Watch Renewal & Label Inception (Stage 4)
+    try {
+      const gmailRefreshToken = process.env.GMAIL_USER_REFRESH_TOKEN;
+      if (!gmailRefreshToken || gmailRefreshToken === 'PLACEHOLDER' || gmailRefreshToken.trim() === '') {
+        console.warn('GMAIL_USER_REFRESH_TOKEN is not set or is empty. Skipping Gmail watch renewal.');
+      } else {
+        console.log('Initializing Gmail client for watch renewal...');
+        const oauth2Client = getGmailOAuth2Client();
+        oauth2Client.setCredentials({ refresh_token: gmailRefreshToken });
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+        const labelId = await getOrCreateGmailLabel(gmail, '!to-obsidian');
+
+        const projectId = process.env.PROJECT_ID;
+        if (!projectId) {
+          throw new Error('PROJECT_ID environment variable is missing');
+        }
+
+        console.log(`Setting up Gmail watch for topic: projects/${projectId}/topics/gmail-inbox-updates and label ID: ${labelId}`);
+        const gmailWatchResponse = await gmail.users.watch({
+          userId: 'me',
+          requestBody: {
+            topicName: `projects/${projectId}/topics/gmail-inbox-updates`,
+            labelIds: [labelId],
+            labelFilterBehavior: 'INCLUDE',
+          },
+        });
+
+        console.log('Gmail watch renewed successfully:', gmailWatchResponse.data);
+        console.log(`Gmail watch historyId: ${gmailWatchResponse.data.historyId}, expiration: ${gmailWatchResponse.data.expiration}`);
+      }
+    } catch (gmailError: any) {
+      console.error('Failed to renew Gmail watch (non-fatal):', gmailError);
     }
 
     res.status(200).send('Watch renewal and fallback trigger completed');
