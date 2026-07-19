@@ -4,6 +4,8 @@ import { Firestore } from '@google-cloud/firestore';
 import { PubSub } from '@google-cloud/pubsub';
 import { v4 as uuidv4 } from 'uuid';
 import { OAuth2Client } from 'google-auth-library';
+import { simpleParser } from 'mailparser';
+import { GoogleGenAI } from '@google/genai';
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -755,6 +757,250 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Error running worker list/process loop:', error);
     res.status(500).send(`Error running worker: ${error.message || String(error)}`);
+  }
+});
+
+// POST /webhooks/gmail (Private, triggered by Pub/Sub Push subscription)
+app.post('/webhooks/gmail', async (req: Request, res: Response) => {
+  console.log('Gmail webhook triggered. Body:', req.body);
+
+  const isAuthorized = await verifyOidcToken(req);
+  if (!isAuthorized) {
+    res.status(401).send('Unauthorized');
+    return;
+  }
+
+  try {
+    const gmailRefreshToken = process.env.GMAIL_USER_REFRESH_TOKEN;
+    if (!gmailRefreshToken || gmailRefreshToken === 'PLACEHOLDER' || gmailRefreshToken.trim() === '') {
+      console.error('GMAIL_USER_REFRESH_TOKEN is not set or is empty');
+      res.status(500).send('Gmail client refresh token is missing');
+      return;
+    }
+
+    const oauth2Client = getGmailOAuth2Client();
+    oauth2Client.setCredentials({ refresh_token: gmailRefreshToken });
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+    // Query for messages with the !to-obsidian label
+    const listResponse = await gmail.users.messages.list({
+      userId: 'me',
+      q: 'label:!to-obsidian',
+    });
+
+    const messages = listResponse.data.messages || [];
+    console.log(`Found ${messages.length} messages with label "!to-obsidian"`);
+
+    for (const msg of messages) {
+      const messageId = msg.id;
+      if (!messageId) continue;
+
+      const emailRef = db.collection('processed_emails').doc(messageId);
+
+      // Acquire distributed lock via transaction
+      const shouldProcess = await db.runTransaction(async (transaction) => {
+        const doc = await transaction.get(emailRef);
+        const now = new Date();
+        if (doc.exists) {
+          const data = doc.data();
+          if (data) {
+            if (data.status === 'completed') {
+              console.log(`Email lock check: ${messageId} is already marked as completed.`);
+              return false;
+            }
+            if (data.status === 'processing') {
+              const lockedAt = data.lockedAt?.toDate();
+              if (lockedAt && (now.getTime() - lockedAt.getTime()) < 15 * 60 * 1000) {
+                console.log(`Email lock check: ${messageId} is currently being processed.`);
+                return false;
+              } else {
+                console.log(`Email lock check: ${messageId} lock expired. Re-acquiring lock.`);
+              }
+            }
+          }
+        }
+        transaction.set(emailRef, {
+          status: 'processing',
+          lockedAt: now,
+        }, { merge: true });
+        return true;
+      });
+
+      if (!shouldProcess) {
+        continue;
+      }
+
+      console.log(`Processing email message: ${messageId}`);
+
+      try {
+        // Fetch raw email RFC 822 content
+        const messageResponse = await gmail.users.messages.get({
+          userId: 'me',
+          id: messageId,
+          format: 'raw',
+        });
+
+        const rawBase64 = messageResponse.data.raw;
+        if (!rawBase64) {
+          throw new Error('Email raw content is empty');
+        }
+
+        const rawBuffer = Buffer.from(rawBase64, 'base64url');
+        const parsedEmail = await simpleParser(rawBuffer);
+
+        const subject = parsedEmail.subject || 'No Subject';
+        const senderText = parsedEmail.from?.text || 'Unknown Sender';
+        const dateObj = parsedEmail.date || new Date();
+        const dateStr = dateObj.toISOString().split('T')[0];
+        const bodyText = parsedEmail.text || '';
+        const threadId = messageResponse.data.threadId || msg.threadId || '';
+
+        // Initialize Vertex AI Gemini SDK
+        const ai = new GoogleGenAI({
+          vertexai: true,
+          project: process.env.PROJECT_ID,
+          location: process.env.GCP_REGION || 'us-central1',
+        });
+
+        const prompt = `You are an expert personal data assistant. Analyze the following raw email payload. Extract a concise summary of the email, extract all actionable TODO items or tasks, determine the matching tags for classification, and convert the core body into clean, semantic Markdown. Return your response matching the requested JSON schema exactly.
+
+Sender: ${senderText}
+Subject: ${subject}
+Date: ${dateStr}
+Body:
+${bodyText}`;
+
+        const responseSchema = {
+          type: 'OBJECT',
+          properties: {
+            summary: { type: 'STRING', description: 'A concise 2-3 sentence summary of the email context.' },
+            tasks: {
+              type: 'ARRAY',
+              items: { type: 'STRING' },
+              description: 'Action items or todo tasks extracted from the email body.',
+            },
+            tags: {
+              type: 'ARRAY',
+              items: { type: 'STRING' },
+              description: 'Extracted topics or folders. Example: project/updates, Journal, Project, ProjectPlan',
+            },
+            cleanMarkdown: {
+              type: 'STRING',
+              description: 'The email body converted to clean, reader-friendly Markdown.',
+            },
+          },
+          required: ['summary', 'tasks', 'tags', 'cleanMarkdown'],
+        };
+
+        console.log(`Querying Gemini 1.5 Flash for message: ${messageId}`);
+        const geminiResponse = await ai.models.generateContent({
+          model: 'gemini-1.5-flash',
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: responseSchema as any,
+          },
+        });
+
+        const geminiText = geminiResponse.text;
+        if (!geminiText) {
+          throw new Error('Gemini returned an empty response');
+        }
+
+        const result = JSON.parse(geminiText);
+        const summary = result.summary || '';
+        const tasks = result.tasks || [];
+        const tags = result.tags || [];
+        const cleanMarkdown = result.cleanMarkdown || '';
+
+        let tasksSection = '';
+        if (tasks && tasks.length > 0) {
+          tasksSection = tasks.map((t: string) => `- [ ] ${t}`).join('\n');
+        }
+
+        // Format tags as hashtags
+        const hashtags = tags.map((t: string) => `#${t.startsWith('#') ? t.substring(1) : t}`).join(' ');
+
+        const compiledMarkdown = `---
+type: email-capture
+sender: "${senderText.replace(/"/g, '\\"')}"
+subject: "${subject.replace(/"/g, '\\"')}"
+timestamp: "${dateStr}"
+email-link: "https://mail.google.com/mail/u/0/#all/${threadId}"
+---
+
+# ${subject}
+
+## 📧 Email Details
+- **Sender:** ${senderText}
+- **Date:** ${dateStr}
+- **Link:** [View in Gmail](https://mail.google.com/mail/u/0/#all/${threadId})
+
+## 📝 Summary
+${summary}
+
+## ⏳ Action Items
+${tasksSection}
+
+---
+
+${cleanMarkdown}
+
+${hashtags}
+`;
+
+        const stagingFolderName = process.env.STAGING_FOLDER_NAME || 'Obsidian Staging';
+        const stagingFolderId = await getRootFolder(stagingFolderName);
+
+        console.log(`Writing note to staging folder for message: ${messageId}`);
+        await drive.files.create({
+          requestBody: {
+            name: `gmail-capture-${messageId}.md`,
+            parents: [stagingFolderId],
+            mimeType: 'text/markdown',
+          },
+          media: {
+            mimeType: 'text/markdown',
+            body: compiledMarkdown,
+          },
+        });
+
+        // Swap labels: remove "!to-obsidian" and add "processed-to-obsidian"
+        const toObsidianLabelId = await getOrCreateGmailLabel(gmail, '!to-obsidian');
+        const processedToObsidianLabelId = await getOrCreateGmailLabel(gmail, 'processed-to-obsidian');
+
+        console.log(`Swapping labels for message: ${messageId}`);
+        await gmail.users.messages.modify({
+          userId: 'me',
+          id: messageId,
+          requestBody: {
+            removeLabelIds: [toObsidianLabelId],
+            addLabelIds: [processedToObsidianLabelId],
+          },
+        });
+
+        // Set Firestore status to completed
+        await emailRef.set({
+          status: 'completed',
+          subject: subject,
+          completedAt: new Date(),
+        }, { merge: true });
+
+        console.log(`Successfully completed processing message: ${messageId}`);
+      } catch (msgError: any) {
+        console.error(`Failed to process message ${messageId}:`, msgError);
+        await emailRef.set({
+          status: 'failed',
+          error: msgError.message || String(msgError),
+          completedAt: new Date(),
+        }, { merge: true });
+      }
+    }
+
+    res.status(200).send('Gmail updates processed successfully');
+  } catch (error: any) {
+    console.error('Error processing Gmail webhook:', error);
+    res.status(500).send(`Error processing Gmail webhook: ${error.message || String(error)}`);
   }
 });
 
