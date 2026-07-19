@@ -422,7 +422,7 @@ app.get('/auth/gmail', (req: Request, res: Response) => {
     const scopes = [
       'https://www.googleapis.com/auth/gmail.readonly',
       'https://www.googleapis.com/auth/gmail.modify',
-      'https://www.googleapis.com/auth/drive.file',
+      'https://www.googleapis.com/auth/drive',
     ];
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
