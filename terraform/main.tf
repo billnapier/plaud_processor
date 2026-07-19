@@ -66,6 +66,11 @@ resource "google_project_service" "aiplatform_api" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "gmail_api" {
+  service            = "gmail.googleapis.com"
+  disable_on_destroy = false
+}
+
 resource "google_secret_manager_secret" "gmail_client_id" {
   secret_id = "GMAIL_CLIENT_ID"
   replication {
