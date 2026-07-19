@@ -117,6 +117,12 @@ resource "google_project_iam_member" "github_actions_sa_user" {
   member  = "serviceAccount:${google_service_account.github_actions.email}"
 }
 
+resource "google_project_iam_member" "github_actions_secretmanager" {
+  project = var.project_id
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.github_actions.email}"
+}
+
 # App Runner Runtime Service Account
 resource "google_service_account" "app_runner" {
   account_id   = "app-runner"
