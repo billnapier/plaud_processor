@@ -143,9 +143,9 @@ resource "google_project_iam_member" "app_runner_pubsub" {
 
 resource "google_secret_manager_secret_iam_member" "app_runner_secret_accessor" {
   for_each  = toset([
-    google_secret_manager_secret.gmail_client_id.id,
-    google_secret_manager_secret.gmail_client_secret.id,
-    google_secret_manager_secret.gmail_user_refresh_token.id
+    google_secret_manager_secret.gmail_client_id.secret_id,
+    google_secret_manager_secret.gmail_client_secret.secret_id,
+    google_secret_manager_secret.gmail_user_refresh_token.secret_id
   ])
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
@@ -153,7 +153,7 @@ resource "google_secret_manager_secret_iam_member" "app_runner_secret_accessor" 
 }
 
 resource "google_secret_manager_secret_iam_member" "app_runner_secret_version_adder" {
-  secret_id = google_secret_manager_secret.gmail_user_refresh_token.id
+  secret_id = google_secret_manager_secret.gmail_user_refresh_token.secret_id
   role      = "roles/secretmanager.secretVersionAdder"
   member    = "serviceAccount:${google_service_account.app_runner.email}"
 }
