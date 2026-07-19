@@ -366,11 +366,19 @@ app.get('/health', (req: Request, res: Response) => {
 /**
  * Helper to initialize and return the Gmail OAuth2 client.
  */
-function getGmailOAuth2Client(): any {
+function getGmailOAuth2Client(req?: Request): any {
   const clientId = process.env.GMAIL_CLIENT_ID;
   const clientSecret = process.env.GMAIL_CLIENT_SECRET;
-  const domain = process.env.DOMAIN_NAME || 'plaud.billnapier.com';
-  const redirectUri = `https://${domain}/auth/gmail/callback`;
+  
+  let redirectUri = '';
+  if (req) {
+    const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    const host = req.get('host');
+    redirectUri = `${protocol}://${host}/auth/gmail/callback`;
+  } else {
+    const domain = process.env.DOMAIN_NAME || 'plaud.billnapier.com';
+    redirectUri = `https://${domain}/auth/gmail/callback`;
+  }
 
   if (!clientId || !clientSecret) {
     throw new Error('GMAIL_CLIENT_ID or GMAIL_CLIENT_SECRET environment variable is missing');
@@ -408,7 +416,7 @@ async function getOrCreateGmailLabel(gmail: any, labelName: string): Promise<str
 // GET /auth/gmail - Redirect to Google consent screen
 app.get('/auth/gmail', (req: Request, res: Response) => {
   try {
-    const oauth2Client = getGmailOAuth2Client();
+    const oauth2Client = getGmailOAuth2Client(req);
     const scopes = [
       'https://www.googleapis.com/auth/gmail.readonly',
       'https://www.googleapis.com/auth/gmail.modify',
@@ -434,7 +442,7 @@ app.get('/auth/gmail/callback', async (req: Request, res: Response) => {
   }
 
   try {
-    const oauth2Client = getGmailOAuth2Client();
+    const oauth2Client = getGmailOAuth2Client(req);
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
 
