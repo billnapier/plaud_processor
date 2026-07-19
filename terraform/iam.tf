@@ -141,6 +141,25 @@ resource "google_project_iam_member" "app_runner_pubsub" {
   member  = "serviceAccount:${google_service_account.app_runner.email}"
 }
 
+resource "google_project_iam_member" "app_runner_secret_accessor" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.app_runner.email}"
+}
+
+resource "google_project_iam_member" "app_runner_secret_version_adder" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretVersionAdder"
+  member  = "serviceAccount:${google_service_account.app_runner.email}"
+}
+
+resource "google_project_iam_member" "app_runner_vertex_ai" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.app_runner.email}"
+}
+
+
 # Pub/Sub Invoker Service Account
 resource "google_service_account" "pubsub_invoker" {
   account_id   = "pubsub-invoker"
