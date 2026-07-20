@@ -347,6 +347,13 @@ function classifyContent(content: string): RoutingResult {
     };
   }
 
+  if (content.includes('type: email-capture') || content.includes('type: "email-capture"')) {
+    return {
+      classification: 'Emails',
+      pathParts: ['Emails'],
+    };
+  }
+
   return {
     classification: 'Unfiled',
     pathParts: ['Unfiled'],

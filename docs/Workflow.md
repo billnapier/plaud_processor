@@ -48,7 +48,8 @@ A decoupled Node.js/TypeScript service deployed on GCP Cloud Run processes new f
   * `#Journal` ➔ `/Journal` (uses a date-based filename fallback).
   * `#project/<ProjectName>` (case-insensitive) ➔ `/Project Updates/<ProjectName>` (recursively created if missing).
   * `#Project` or `#ProjectPlan` ➔ `/Projects`.
-  * No matching tags ➔ `/Unfiled`.
+  * Untagged PLAUD Transcripts ➔ `/Unfiled`.
+  * Untagged Gmail Email Captures ➔ `/Emails`.
 
 
 
