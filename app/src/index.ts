@@ -889,6 +889,11 @@ app.post('/webhooks/gmail', async (req: Request, res: Response) => {
 
         const prompt = `You are an expert personal data assistant. Analyze the following raw email payload. Extract a concise summary of the email, extract all actionable TODO items or tasks, determine the matching tags for classification, and convert the core body into clean, semantic Markdown. Return your response matching the requested JSON schema exactly.
 
+For the TODO items (tasks):
+- You MUST generate at least one TODO item for every email.
+- If there are no clear, actionable tasks to extract (e.g., if the email is purely informational or conversational), generate exactly one fallback TODO item: "please review this email and take appropriate action".
+- Bias heavily towards generating only 1 TODO item. Do NOT list multiple TODO items unless there is a CLEAR and explicit indication in the email that multiple distinct tasks need to be completed.
+
 Sender: ${senderText}
 Subject: ${subject}
 Date: ${dateStr}
@@ -902,7 +907,7 @@ ${bodyText}`;
             tasks: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Action items or todo tasks extracted from the email body.',
+              description: 'Action items or todo tasks extracted from the email body. You must return at least 1 task. If there are no clear tasks, provide "please review this email and take appropriate action". Bias heavily towards returning exactly 1 task unless there is a clear, explicit indication that multiple distinct tasks need to be completed.',
             },
             tags: {
               type: 'array',
