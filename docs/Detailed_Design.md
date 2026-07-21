@@ -6,14 +6,16 @@ This document details the software architecture, data flows, database schemas, a
 
 ## 1. System Architecture & Components
 
-The system is designed as a decoupled, 100% serverless application deployed on **Google Cloud Platform (GCP)** within the free-tier limits where possible. It handles webhook notifications from Google Drive, buffers them via **Cloud Pub/Sub** to avoid webhook timeout limits, processes the files in a background worker, and automates watch-channel renewals via **Cloud Scheduler**.
+The system is designed as a decoupled, 100% serverless application deployed on **Google Cloud Platform (GCP)** within the free-tier limits where possible. It supports two independent entry points for automated ingestion, which converge at the `Obsidian Staging` folder in Google Drive:
+
+1. **PLAUD Transcripts:** Detects new transcripts uploaded to Google Drive, cleans them, and routes them based on tags.
+2. **Gmail Ingestion:** Processes emails labeled with `!to-obsidian`, uses **Gemini 2.5 Flash** (via Vertex AI) for structured metadata extraction, compiles them to Markdown, and writes them to the staging folder.
 
 ### Folder Infrastructure (Google Drive)
-* **Staging Folder:** `Obsidian Staging` (Inbox where new transcript files are uploaded).
-* **Destination Root Folder:** `Obsidian Vault` (Target parent folder where processed transcripts are organized).
+* **Staging Folder:** `Obsidian Staging` (Inbox where new transcript/captured files are uploaded).
+* **Destination Root Folder:** `Obsidian Vault` (Target parent folder where processed files are organized).
 
-### Architectural Sequence
-
+### Architectural Sequence: PLAUD Transcripts
 ```mermaid
 sequenceDiagram
     autonumber
@@ -59,6 +61,42 @@ sequenceDiagram
     RW->>GD: Call drive.channels.stop (Stop previous channel)
     RW->>DB: Update watch channel metadata
     RW-->>SCH: 200 OK
+```
+
+### Architectural Sequence: Gmail & LLM Ingestion
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant GM as Gmail Service
+    participant PS as Pub/Sub (gmail-inbox-updates)
+    participant GW as Cloud Run (/webhooks/gmail)
+    participant SM as Secret Manager
+    participant VAI as Vertex AI (Gemini 2.5 Flash)
+    participant GD as Google Drive (Staging)
+    participant DB as Firestore
+    participant PW as Cloud Run (/pubsub-worker)
+
+    %% Gmail Ingestion Notification Flow
+    User->>GM: Labels email thread with "!to-obsidian"
+    GM->>PS: Publish event notification
+    PS->>GW: HTTPS POST Push Subscription (event data)
+    GW->>SM: Retrieve GMAIL_USER_REFRESH_TOKEN, client credentials
+    SM-->>GW: Tokens and credentials
+    GW->>GM: Fetch raw email content (format: 'raw')
+    GM-->>GW: Raw email content (RFC 822 MIME)
+    GW->>GW: Check & Acquire Firestore lock (processed_emails/{messageId})
+    alt Lock Acquired
+        GW->>VAI: Request structured summary, tasks, tags, clean markdown
+        VAI-->>GW: Return JSON payload
+        GW->>GD: Write compiled Markdown file to staging folder
+        GW->>GM: Remove "!to-obsidian" label, add "processed-to-obsidian" label
+        GW->>DB: Update email state (status: completed)
+        GD-->>PW: Standard Drive Webhook triggers Plaud worker (CUJ-1)
+    else Already Processing / Completed
+        GW->>GW: Skip message
+    end
+    GW-->>PS: 200 OK
 ```
 
 ---
@@ -110,13 +148,53 @@ The Cloud Run service is implemented as a single Node.js/Express service exposin
      * Id: `channelId`
   4. Write the new channel details to Firestore.
   5. If an old channel existed, call `drive.channels.stop` using the old `id` and `resourceId` to cleanly wind it down.
-  6. Return `200 OK`.
+  6. Retrieve `GMAIL_USER_REFRESH_TOKEN` from Google Secret Manager. If present, initialize the Gmail client, resolve/create the `!to-obsidian` label, and call `gmail.users.watch` with topic `projects/<project-id>/topics/gmail-inbox-updates` and label filters to renew the Gmail push notification channel.
+  7. Return `200 OK`.
+
+### 2.4. `POST /webhooks/gmail`
+* **Visibility:** Private (Secured via OIDC token verification; invokable only by Pub/Sub Push Subscription service account).
+* **Payload:** Pub/Sub envelope containing the base64-encoded Gmail notification details.
+* **Behavior:**
+  1. Authenticate the request using OIDC token validation.
+  2. Retrieve `GMAIL_USER_REFRESH_TOKEN` from environment/Secret Manager and authenticate Gmail client.
+  3. Query Gmail for all messages matching `label:!to-obsidian`.
+  4. For each discovered message:
+     * Check if a document exists in Firestore under `processed_emails/{messageId}`.
+     * If not already processing or completed, transactionally set the status to `processing`.
+     * Fetch raw email content (`format: 'raw'`) and parse it using `mailparser` to extract subject, sender, date, body, and threadId.
+     * Generate prompt and invoke **Gemini 2.5 Flash** with strict JSON output schema to obtain: `summary`, `tasks`, `tags`, and `cleanMarkdown`.
+     * Enforce task generation policy: extract actionable TODOs, fallback to a standard review item if none found, biasing toward a single task.
+     * Compile final Markdown note with frontmatter metadata, direct email thread link, summary, checkbox tasks, and the cleaned markdown body.
+     * Append extracted tags as space-separated hashtags to the end of the note.
+     * Write the compiled file to the `Obsidian Staging` folder in Google Drive (this triggers the downstream Plaud worker).
+     * Call Gmail API to remove `!to-obsidian` and add `processed-to-obsidian` labels.
+     * Update the Firestore document to status `completed`.
+  5. Return `200 OK`.
+
+### 2.5. `GET /auth/gmail`
+* **Visibility:** Public admin endpoint.
+* **Payload:** None.
+* **Behavior:**
+  1. Generate Google OAuth 2.0 authorization URL requesting scopes for `gmail.readonly`, `gmail.modify`, and `drive`.
+  2. Set `access_type: 'offline'` and `prompt: 'consent'` to guarantee Google returns a refresh token.
+  3. Redirect user's browser to Google's consent screen.
+
+### 2.6. `GET /auth/gmail/callback`
+* **Visibility:** Public admin callback endpoint.
+* **Payload:** Query parameters containing the authorization `code`.
+* **Behavior:**
+  1. Exchange the authorization code for access and refresh tokens.
+  2. Instantiate a temporary Gmail client and query `gmail.users.getProfile({ userId: 'me' })`.
+  3. Extract the authenticated user's email address and compare it to the `ALLOWED_EMAIL` environment variable.
+  4. If they do not match, abort with `403 Forbidden` and do not save any token.
+  5. If authorized, write the permanent `refresh_token` into Google Secret Manager under the secret name `GMAIL_USER_REFRESH_TOKEN`.
+  6. Return a success page to the user.
 
 ---
 
 ## 3. Database Schema (Firestore)
 
-Firestore is used in Native mode to maintain lightweight distributed locks and track channel renewals.
+Firestore is used in Native mode to maintain lightweight distributed locks, track channel renewals, and guarantee exactly-once processing of email messages.
 
 ### 3.1. Collection: `watch_channels`
 Stores current Google Drive watch subscriptions.
@@ -133,7 +211,7 @@ Stores current Google Drive watch subscriptions.
 ```
 
 ### 3.2. Collection: `processed_files`
-Acts as a distributed lock and processing history log to ensure idempotency.
+Acts as a distributed lock and processing history log for Google Drive files to ensure idempotency.
 
 ```json
 {
@@ -145,6 +223,21 @@ Acts as a distributed lock and processing history log to ensure idempotency.
   "error": null | "Error description text",
   "lockedAt": "2026-06-16T12:05:01Z",
   "completedAt": "2026-06-16T12:05:08Z"
+}
+```
+
+### 3.3. Collection: `processed_emails`
+Acts as a distributed lock and deduplication log for Gmail messages.
+
+```json
+{
+  "id": "18f3a5b28d7c4a1e",              // The Gmail messageId
+  "status": "processing" | "completed" | "failed",
+  "driveFileId": "0B456_abc...",         // Google Drive file ID of the generated note
+  "subject": "Fwd: Project Updates",
+  "error": null | "Error description text",
+  "lockedAt": "2026-07-19T03:54:42Z",
+  "completedAt": "2026-07-19T03:55:10Z"
 }
 ```
 
@@ -219,39 +312,135 @@ All processed files are renamed to include a date prefix (`YYYY-MM-DD`) and a sa
 
 ---
 
-## 6. Infrastructure Code (Terraform)
+## 6. Gmail Ingestion & LLM Processing Engine
+
+When a Gmail message labeled with `!to-obsidian` is detected, `/webhooks/gmail` processes the ingestion, parsing, LLM-based structured data extraction, and compiles the final note.
+
+### 6.1. Webhook Ingestion & Deduplication
+1. **Pub/Sub Trigger:** Gmail's push service fires to `gmail-inbox-updates`, triggering `/webhooks/gmail` via the Pub/Sub push subscription.
+2. **Retrieve Labeled Messages:** The handler reads credentials from Secret Manager, connects to the Gmail API, and queries for all messages matching `label:!to-obsidian`.
+3. **Firestore Lock & Deduplication:** For each message ID, a transaction checks the `processed_emails` collection. If the status is `completed` or `processing` (and less than 15 minutes old), the message is skipped. Otherwise, the status is set to `processing` with a lock timestamp.
+
+### 6.2. MIME Parsing
+The message payload is fetched in raw RFC 822 format and parsed using `mailparser`. The parser extracts:
+* **Subject:** Falls back to `No Subject`.
+* **Sender:** Extracts text representation of sender.
+* **Date:** Parses email date, falling back to the current date.
+* **Body:** Extracts plain text body content.
+* **Link:** Constructs a direct URL to the Gmail thread: `https://mail.google.com/mail/u/0/#all/${threadId}`.
+
+### 6.3. Gemini Orchestration & JSON Schema
+The plain-text body is sent to **Gemini 2.5 Flash** (using Vertex AI via the `@google/genai` client). The model response is strictly enforced using the following JSON schema:
+```typescript
+const responseSchema = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string', description: 'A concise 2-3 sentence summary of the email context.' },
+    tasks: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Action items or todo tasks extracted from the email body. You must return at least 1 task. If there are no clear tasks, provide "please review this email and take appropriate action". Bias heavily towards returning exactly 1 task unless there is a clear, explicit indication that multiple distinct tasks need to be completed.',
+    },
+    tags: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Extracted topics or folders. Example: project/updates, Journal, Project, ProjectPlan',
+    },
+    cleanMarkdown: {
+      type: 'string',
+      description: 'The email body converted to clean, reader-friendly Markdown.',
+    },
+  },
+  required: ['summary', 'tasks', 'tags', 'cleanMarkdown'],
+};
+```
+
+**Task Extraction Policy:**
+* **Minimum Tasks:** Gemini must return at least 1 task. If no actionable item is found, it returns: `"please review this email and take appropriate action"`.
+* **Single Task Bias:** Gemini is biased to output a single task unless multiple distinct actions are explicitly defined.
+
+### 6.4. Document Compilation & Delivery
+The service compiles a structured Markdown file using the structured JSON response:
+```markdown
+---
+type: email-capture
+sender: "<Sender Email>"
+subject: "<Email Subject>"
+timestamp: "<YYYY-MM-DD>"
+email-link: "https://mail.google.com/mail/u/0/#all/<threadId>"
+---
+
+# <Email Subject>
+
+## 📧 Email Details
+- **Sender:** <Sender Name/Email>
+- **Date:** <YYYY-MM-DD>
+- **Link:** [View in Gmail](https://mail.google.com/mail/u/0/#all/<threadId>)
+
+## 📝 Summary
+<summary value from Gemini>
+
+## ⏳ Action Items
+- [ ] <task 1 from Gemini>
+- [ ] <task 2 from Gemini>
+
+---
+
+<cleanMarkdown body from Gemini>
+
+#<tag1> #<tag2>
+```
+* **Hashtags:** The extracted tags are appended as hashtags to the end of the markdown body, which allows the downstream Plaud routing engine to automatically classify and route the note once written to Google Drive.
+* **Google Drive Upload:** The Markdown file is saved to the `Obsidian Staging` folder as `gmail-capture-${messageId}.md` using the authenticated user's Drive API permissions.
+* **Downstream Trigger:** This write triggers the Drive Webhook `/webhook` and runs the `/pubsub-worker` to sanitize, rename, and route the file to its destination folder under `Obsidian Vault` (or `/Emails` if untagged).
+* **Gmail Label Swapping:** On success, the `!to-obsidian` label is removed, and `processed-to-obsidian` is applied. The Firestore lock is updated to `completed`.
+
+---
+
+## 7. Infrastructure Code (Terraform)
 
 All infrastructure is provisioned using Terraform, targeting a single GCP production project.
 
-### 6.1. Resource Architecture
-* **`google_project_service`**: Enables `run.googleapis.com`, `pubsub.googleapis.com`, `firestore.googleapis.com`, and `cloudscheduler.googleapis.com`.
+### 7.1. Resource Architecture
+* **`google_project_service`**: Enables `run.googleapis.com`, `pubsub.googleapis.com`, `firestore.googleapis.com`, `cloudscheduler.googleapis.com`, `secretmanager.googleapis.com`, and `aiplatform.googleapis.com`.
 * **`google_firestore_database`**: Created as `(default)` in Native mode.
-* **`google_pubsub_topic`**: Topic `drive-file-changes` with a dead-letter queue configured for failures.
-* **`google_pubsub_subscription`**: Push subscription targeting the Cloud Run `/pubsub-worker` endpoint.
-* **`google_cloud_run_v2_service`**: The containerized Express service configured with:
-  * Min instances: 0 (to stay within free tier during idle times).
-  * Max instances: 2 (to limit concurrent API quotas).
-  * Environment variables pointing to folder mappings and Firestore configs.
+* **`google_pubsub_topic`**:
+  * Topic `drive-file-changes`: Buffers Drive changes, triggering `/pubsub-worker`.
+  * Topic `gmail-inbox-updates`: Receives push events from the Gmail Service, triggering `/webhooks/gmail`.
+* **`google_pubsub_subscription`**: Push subscriptions targeting `/pubsub-worker` and `/webhooks/gmail` endpoints respectively.
+* **`google_pubsub_topic_iam_member`**: Grants `roles/pubsub.publisher` on `gmail-inbox-updates` to the Gmail push service account `serviceAccount:gmail-api-push@system.gserviceaccount.com`.
+* **`google_secret_manager_secret`**: Provisioned secret containers:
+  * `GMAIL_CLIENT_ID` (OAuth client ID)
+  * `GMAIL_CLIENT_SECRET` (OAuth client secret)
+  * `GMAIL_USER_REFRESH_TOKEN` (User refresh token)
+* **`google_cloud_run_v2_service`**: Containerized Express service with environment variables:
+  * `STAGING_FOLDER_NAME` (Defaults to `Obsidian Staging`)
+  * `VAULT_FOLDER_NAME` (Defaults to `Obsidian Vault`)
+  * `ALLOWED_EMAIL` (Plaintext email allowed to complete the OAuth handshake)
+  * Secret bindings exposing secret keys as environment variables.
 * **`google_cloud_scheduler_job`**: Cron configuration `0 */12 * * *` targeting `/renew-watch`.
 
-### 6.2. IAM Roles & Permissions
+### 7.2. IAM Roles & Permissions
 A zero-trust model is enforced using specialized service accounts:
 
 1. **`app-runner` (Cloud Run Runtime):**
    * `roles/datastore.user` (Access to Firestore locks/channels)
    * `roles/logging.logWriter` (Write application logs)
+   * `roles/aiplatform.user` (Vertex AI access to execute Gemini models)
+   * `roles/secretmanager.secretAccessor` (Access OAuth client credentials and refresh token)
+   * `roles/secretmanager.secretVersionAdder` (OAuth callback adds new versions to `GMAIL_USER_REFRESH_TOKEN`)
 2. **`pubsub-invoker` (Pub/Sub Push Subscription):**
-   * `roles/run.invoker` (Permission to trigger `/pubsub-worker` private Cloud Run route)
+   * `roles/run.invoker` (Permission to trigger `/pubsub-worker` and `/webhooks/gmail` private Cloud Run routes)
 3. **`scheduler-invoker` (Cloud Scheduler Trigger):**
    * `roles/run.invoker` (Permission to trigger `/renew-watch` private Cloud Run route)
 
 ---
 
-## 7. Deployment & CI/CD Workflow
+## 8. Deployment & CI/CD Workflow
 
 Deployment is automated via **GitHub Actions** and **Workload Identity Federation (WIF)**, eliminating the need to store long-lived service account JSON keys.
 
-### 7.1. Deployment Prerequisites
+### 8.1. Deployment Prerequisites
 Before running the deployment pipeline, two external manual steps must occur:
 
 1. **Domain Ownership Verification:**
@@ -261,7 +450,7 @@ Before running the deployment pipeline, two external manual steps must occur:
    * Create the `Obsidian Staging` and `Obsidian Vault` folders.
    * Add the `app-runner` service account email (e.g., `app-runner@project-id.iam.gserviceaccount.com`) as an **Editor** on these folders.
 
-### 7.2. CI/CD Pipeline Stages
+### 8.2. CI/CD Pipeline Stages
 ```mermaid
 graph LR
     Push[git push main] --> Lint[Lint & Build Check]
@@ -276,3 +465,4 @@ graph LR
 3. **Terraform Apply:** Update infrastructure configurations (Pub/Sub, IAM, Firestore, Cloud Scheduler).
 4. **Build & Push:** Package the Node.js/Express app into a Docker container and push to GCP Artifact Registry.
 5. **Deploy Service:** Deploy the newly pushed image to Cloud Run, updating environment variables.
+

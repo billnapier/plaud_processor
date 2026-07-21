@@ -71,9 +71,22 @@ Because Obsidian requires local file system access, the Android storage pipeline
 
 ### E. Linux & Desktop Sync Architecture (rclone)
 
-
-
 For desktop and Linux environments, the system utilizes rclone --bisync to perform a bi-directional sync between the Google Drive folder and the local Obsidian vault, ensuring that changes are identical across all devices.
+
+### F. The Email-to-Note Ingestion Pipeline (Gmail ➔ Gemini ➔ Obsidian)
+
+The Gmail ingestion pipeline captures important emails on the go, extracts key information using Gemini, and routes them to Obsidian.
+
+1. **Trigger:** You apply the `!to-obsidian` label to an email thread.
+2. **Event Delivery:** Gmail's push service fires a notification to Pub/Sub (`gmail-inbox-updates`), triggering `/webhooks/gmail`.
+3. **AI Processing:** The backend downloads the email content and invokes **Gemini 2.5 Flash** (via Vertex AI) using a strict schema to generate:
+   - A concise summary (2-3 sentences).
+   - Actionable TODO items (tasks) - at least one, fallback to "please review this email and take appropriate action" if none are found, biasing towards a single task.
+   - Classification tags (such as `#project/updates`, `#Journal`, etc.).
+   - Clean Markdown representation of the body.
+4. **Document Compilation:** The webhook builds a Markdown note containing Gmail metadata, link to thread, summary, checkbox tasks, and clean Markdown body, appending the classification tags as hashtags.
+5. **Staging & Downstream Routing:** The compiled file is saved to `Obsidian Staging`, which fires the standard Google Drive webhook, running the Plaud worker to classify and move it (e.g. to `/Emails` if untagged).
+6. **State Cleanup:** The `!to-obsidian` label is removed, `processed-to-obsidian` is added to the Gmail thread, and Firestore updates the message status to `completed`.
 
 ---
 

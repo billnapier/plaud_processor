@@ -6,52 +6,63 @@ This document defines the selected tech stack, architecture, and deployment stra
 
 ## 1. System Overview
 
-The system automates the ingestion, post-processing, and classification of meeting transcripts/summaries.
+The system automates the ingestion, post-processing, and classification of two distinct streams of personal data:
 
-1. **Ingestion:** A physical device drops new transcript/summary files into a specific "Inbox" folder in Google Drive.
-2. **Detection:** Google Drive sends a webhook notification to our service indicating a file was created.
-3. **Cleanup:** The service reads the file, cleans the content (post-processing rules, regex cleanup), and prepares it.
-4. **Classification:** The service analyzes the content (initially programmatically via rules, migrating to Gemini LLM classification) to determine the correct destination folder.
-5. **Routing:** The service moves the processed file to the selected target Google Drive folder.
+1. **PLAUD Transcripts:** Audio transcript/summary files are captured and uploaded to a staging folder in Google Drive. They are detected via webhooks, cleaned up using regex rules, and routed based on hashtags to appropriate vault subfolders.
+2. **Gmail Ingestion:** Labeled email threads (using the `!to-obsidian` label) are detected in real-time, routed through **Gemini 2.5 Flash** (via Vertex AI) for automated summarization, task extraction, and tag identification, compiled into structured Markdown notes, and placed into the same Google Drive staging folder (where they are recursively processed and routed by the Plaud worker).
 
 ---
 
 ## 2. Selected Architecture: Decoupled Cloud Run + Pub/Sub
 
-To ensure reliability, avoid timeouts from Google Drive webhooks, and maintain a 100% serverless profile within the GCP free tier, the system uses a **decoupled Cloud Run + Pub/Sub** architecture.
+To ensure reliability, avoid timeouts from API webhooks, and maintain a 100% serverless profile within the GCP free tier, the system uses a **decoupled Cloud Run + Pub/Sub** architecture.
 
 ```mermaid
 graph TD
-    GD[Google Drive Inbox Folder] -->|Webhook POST| CR_Webhook[Cloud Run: /webhook]
-    CR_Webhook -->|Acknowledge & Publish| PS[GCP Pub/Sub Topic]
-    PS -->|Push Subscription POST| CR_Worker[Cloud Run: /pubsub-worker]
-    CR_Worker -->|Download & Post-Process| FileOps[File Manipulation]
-    CR_Worker -->|Classify Content| Gemini[Gemini API]
-    FileOps & Gemini -->|Move File| GD_Dest[Google Drive Target Folder]
+    %% Google Drive & Plaud Ingestion
+    GD_Inbox[Google Drive Inbox Folder] -->|Webhook POST| CR_Webhook[Cloud Run: /webhook]
+    CR_Webhook -->|Acknowledge & Publish| PS_Drive[Pub/Sub: drive-file-changes]
+    PS_Drive -->|Push Subscription POST| CR_Worker[Cloud Run: /pubsub-worker]
+    CR_Worker -->|Download & Clean| FileOps[File Clean & Move]
+    FileOps -->|Move File| GD_Dest[Google Drive Target Folder]
+
+    %% Gmail Ingestion
+    Gmail[Gmail Client / Label: !to-obsidian] -->|Push Event| PS_Gmail[Pub/Sub: gmail-inbox-updates]
+    PS_Gmail -->|Push Subscription POST| CR_GmailWebhook[Cloud Run: /webhooks/gmail]
+    CR_GmailWebhook -->|Gemini Structuring| Gemini[Vertex AI: Gemini 2.5 Flash]
+    CR_GmailWebhook -->|Save MD File| GD_Inbox
     
-    Scheduler[Cloud Scheduler: Every 12 Hours] -->|HTTP POST| CR_Watch[Cloud Run: /renew-watch]
+    %% Scheduled Watch Renewal
+    Scheduler[Cloud Scheduler: Every 12 Hours] -->|HTTP POST| CR_Renew[Cloud Run: /renew-watch]
+    CR_Renew -->|Renew Webhook Watch| GD_Inbox
+    CR_Renew -->|Renew Push Subscription| Gmail
 ```
 
 ### Components
 
 1. **Cloud Run Service (Production Only):**
-   A single Dockerized web service (written in Node.js/TypeScript) exposing three HTTP endpoints:
+   A single Dockerized web service (written in Node.js/TypeScript) exposing the following HTTP endpoints:
    - **`POST /webhook`**
      * **Purpose:** Public endpoint registered with Google Drive's Push Notifications.
-     * **Logic:** Receives the Google Drive push header notification. Extracts the channel and resource identifiers (the payload itself is empty), publishes a message containing these headers to the Pub/Sub topic, and immediately responds with `200 OK`.
+     * **Logic:** Receives the Google Drive push header notification. Extracts the channel and resource identifiers (the payload itself is empty), publishes a message containing these headers to the Pub/Sub topic `drive-file-changes`, and immediately responds with `200 OK`.
    - **`POST /pubsub-worker`**
-     * **Purpose:** Private endpoint triggered by a Pub/Sub Push Subscription.
-     * **Logic:** Receives the message payload, calls the Google Drive API to list the files in the "Inbox" folder. For each found file:
+     * **Purpose:** Private endpoint triggered by a Pub/Sub Push Subscription on `drive-file-changes`.
+     * **Logic:** Receives the message payload, calls the Google Drive API to list the files in the staging folder. For each found file:
        1. Acquires a processing lease/lock in Firestore for the `fileId` (using a simple read-then-write check).
        2. Downloads the file content.
        3. Executes the post-processing regex text cleanup.
-       4. Classifies the content programmatically using rule-based/regex routing rules (Gemini API classification is planned for a future phase).
+       4. Classifies the content programmatically using rule-based/regex routing rules.
        5. Renames the file by combining a resolved date (extracted from content timestamp, title prefix, original filename timestamp/date, or current date fallback) and a sanitized base title (extracted from the first H1 markdown heading, or fallback original name). Prepend date if not already present. Sanitizes illegal characters for Google Drive compatibility. Performs a case-insensitive check of existing filenames in the destination folder to append an incrementing suffix (e.g. `_1`) if there is a collision.
        6. Moves the file to the target folder in Google Drive.
        7. Releases/updates the Firestore state.
+   - **`POST /webhooks/gmail`**
+     * **Purpose:** Private endpoint triggered by a Pub/Sub Push Subscription on `gmail-inbox-updates`.
+     * **Logic:** Triggered by updates to the labeled Gmail thread. Fetches the raw RFC 822 MIME mail, parses it, and sends the body text to **Gemini 2.5 Flash** (via Vertex AI) using a strict JSON response schema. Compiles the summary, task checkbox lists, and tags into a clean Markdown note, and writes it to the staging folder in Google Drive. It then removes the `!to-obsidian` label and adds `processed-to-obsidian` to the thread.
+   - **`GET /auth/gmail` & `GET /auth/gmail/callback`**
+     * **Purpose:** Admin OAuth 2.0 flow for authenticating the service with the user's Gmail mailbox. Secures access by enforcing `ALLOWED_EMAIL` verification.
    - **`POST /renew-watch`**
      * **Purpose:** Private endpoint triggered by Cloud Scheduler.
-     * **Logic:** Establishes/renews the 24-hour Google Drive notification channel on the "Inbox" folder and stores the active `channelId` and `resourceId` in Firestore.
+     * **Logic:** Establishes/renews the 24-hour Google Drive notification channel on the staging folder and the Gmail notification channel on the user's inbox, updating active subscriptions in Firestore and Secret Manager.
 
 2. **GCP Pub/Sub Topic (`drive-file-changes`):**
    * Buffers webhook events and triggers the `/pubsub-worker` asynchronously.
@@ -77,8 +88,8 @@ We manage all infrastructure using Terraform. The structure mirrors the single-e
 * **No Staging Environment:** The deployment targets a single production GCP project.
 * **Workload Identity Federation (WIF):** Authenticates the GitHub Actions runner against GCP without managing long-lived Service Account keys.
 * **Service Accounts:**
-  * `app-runner`: Runs the Cloud Run instance. Requires permissions to access Google Drive API, Firestore (`roles/datastore.user`), and logging.
-  * `pubsub-invoker`: Impersonated by Pub/Sub to call the `/pubsub-worker` endpoint securely.
+  * `app-runner`: Runs the Cloud Run instance. Requires permissions to access Google Drive API, Firestore (`roles/datastore.user`), logging, Vertex AI (`roles/aiplatform.user`), and Secret Manager (`roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder`).
+  * `pubsub-invoker`: Impersonated by Pub/Sub to call the `/pubsub-worker` and `/webhooks/gmail` endpoints securely.
   * `scheduler-invoker`: Impersonated by Cloud Scheduler to call the `/renew-watch` endpoint.
 
 ---
@@ -96,12 +107,10 @@ For the integration to work seamlessly, the following must be set up:
 
 ---
 
-## 5. Future Implementation Guidelines
+## 5. Gemini & State Management Implementation
 
-When writing the application code:
-* **Runtime:** Use Node.js and TypeScript.
-* **Gemini SDK (Future Milestone):** In a later phase, use the official `@google/genai` (Node.js) client configured to use **Vertex AI** via application default credentials (`aiplatform.user` IAM role) with structured JSON schemas to classify transcripts.
-* **State & Loop Management:** 
-  - Since the watch channel is established *only* on the Inbox folder, events are triggered by additions and moves/deletions.
-  - The worker must query the files currently inside the Inbox folder. If no files exist (e.g. after a file has been successfully moved out of the Inbox), the worker exits gracefully.
-  - Firestore must be updated with the `fileId` state to lock files currently processing, preventing duplicate runs from concurrent Pub/Sub retries. Simple read-then-write checks are used for locks.
+1. **Runtime:** Node.js and TypeScript.
+2. **Gemini SDK Integration:** Uses the official `@google/genai` client configured to use **Vertex AI** via application default credentials (`aiplatform.user` IAM role) with a strict structured JSON response schema to summarize emails, extract checklist TODO tasks, and classify folders.
+3. **State & Loop Management:** 
+   - Google Drive events are triggered by additions and moves/deletions. The worker queries the active files currently inside the staging folder. If no files exist, it exits gracefully.
+   - Firestore native database acts as a distributed lock manager to ensure idempotency. Simple read-then-write transactions lock files/messages under `processed_files/{fileId}` and `processed_emails/{messageId}` during execution.
