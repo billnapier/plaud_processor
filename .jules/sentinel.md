@@ -1,0 +1,4 @@
+## 2024-07-24 - [CRITICAL] Authentication Bypass via Negative Environment Checks
+**Vulnerability:** The `verifyOidcToken` function was completely bypassed in production due to a negative check: `if (process.env.NODE_ENV !== 'production')`. Since Docker/Terraform environments didn't explicitly set `NODE_ENV='production'`, it defaulted to undefined, making the condition true and skipping authentication for all internal webhooks and workers.
+**Learning:** Checking what an environment variable *isn't* (`!== 'production'`) fails open (insecure) if the variable is missing. It bypasses security controls in environments where `NODE_ENV` is just undefined.
+**Prevention:** Always use positive checks for development bypasses (e.g., `=== 'development'`). Fail securely by default if variables are missing.
