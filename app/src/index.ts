@@ -33,8 +33,8 @@ const authClient = new OAuth2Client();
  * In a non-production environment, it allows skipping if no auth header is present.
  */
 async function verifyOidcToken(req: Request): Promise<boolean> {
-  if (process.env.NODE_ENV !== 'production' && !req.headers.authorization) {
-    console.log('Skipping OIDC verification in non-production local environment');
+  if (process.env.NODE_ENV === 'development' && !req.headers.authorization) {
+    console.log('Skipping OIDC verification in local development environment');
     return true;
   }
 
@@ -439,7 +439,7 @@ app.get('/auth/gmail', (req: Request, res: Response) => {
     res.redirect(authUrl);
   } catch (error: any) {
     console.error('Failed to generate Gmail auth URL:', error);
-    res.status(500).send(`Error: ${error.message || String(error)}`);
+    res.status(500).send('An internal server error occurred');
   }
 });
 
@@ -506,7 +506,7 @@ app.get('/auth/gmail/callback', async (req: Request, res: Response) => {
     res.status(200).send('Gmail authentication setup complete. You can now close this window.');
   } catch (error: any) {
     console.error('Failed to complete Gmail authentication callback:', error);
-    res.status(500).send(`Error: ${error.message || String(error)}`);
+    res.status(500).send('An internal server error occurred');
   }
 });
 
@@ -774,7 +774,7 @@ app.post('/pubsub-worker', async (req: Request, res: Response) => {
     res.status(200).send('Pub/Sub worker executed successfully');
   } catch (error: any) {
     console.error('Error running worker list/process loop:', error);
-    res.status(500).send(`Error running worker: ${error.message || String(error)}`);
+    res.status(500).send('An internal server error occurred');
   }
 });
 
@@ -1036,7 +1036,7 @@ ${hashtags}
     res.status(200).send('Gmail updates processed successfully');
   } catch (error: any) {
     console.error('Error processing Gmail webhook:', error);
-    res.status(500).send(`Error processing Gmail webhook: ${error.message || String(error)}`);
+    res.status(500).send('An internal server error occurred');
   }
 });
 
@@ -1159,7 +1159,7 @@ app.post('/renew-watch', async (req: Request, res: Response) => {
     res.status(200).send('Watch renewal and fallback trigger completed');
   } catch (error: any) {
     console.error('Error renewing watch channel:', error);
-    res.status(500).send(`Error renewing watch: ${error.message || String(error)}`);
+    res.status(500).send('An internal server error occurred');
   }
 });
 
