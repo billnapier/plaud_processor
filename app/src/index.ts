@@ -45,11 +45,8 @@ async function verifyOidcToken(req: Request): Promise<boolean> {
   }
 
   const token = authHeader.split(' ')[1];
-  const host = req.get('host');
-  const protocol = req.protocol;
-  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
-  const currentProtocol = isHttps ? 'https' : protocol;
-  const audience = `${currentProtocol}://${host}${req.originalUrl}`;
+  const domain = process.env.DOMAIN_NAME || 'plaud.billnapier.com';
+  const audience = `https://${domain}${req.originalUrl}`;
 
   try {
     // Cloud Run and Pub/Sub can use different audiences depending on how they call the service.
@@ -57,7 +54,7 @@ async function verifyOidcToken(req: Request): Promise<boolean> {
     console.log(`Verifying OIDC token. Expected audience: ${audience}`);
     const ticket = await authClient.verifyIdToken({
       idToken: token,
-      audience: [audience, `${currentProtocol}://${host}`],
+      audience: [audience, `https://${domain}`],
     });
 
     const payload = ticket.getPayload();
