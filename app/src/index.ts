@@ -360,12 +360,18 @@ function classifyContent(content: string): RoutingResult {
   };
 }
 
-// Root path for status checks / smoke tests
+/**
+ * Root endpoint for basic service health and status checks.
+ * Returns a 200 OK text response confirming service availability.
+ */
 app.get('/', (req: Request, res: Response) => {
   res.status(200).send('Plaud Processor is running');
 });
 
-// Health check endpoint
+/**
+ * Health check endpoint used by Cloud Run probes and uptime checks.
+ * Returns 200 OK when the application container is ready to serve requests.
+ */
 app.get('/health', (req: Request, res: Response) => {
   res.status(200).send('OK');
 });
