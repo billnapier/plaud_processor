@@ -13,6 +13,7 @@ This document specifies the Critical User Journeys (CUJs) supported by the **pla
 | **CUJ-3** | [Gmail Ingestion & LLM Structuring](#cuj-3-gmail-ingestion-llm-structuring) | Forward flagged email content to the Obsidian vault as a clean, structured Markdown note with LLM-extracted metadata. | Thread labeled `to-obsidian` in Gmail. | Gmail Labels: `to-obsidian` -> `processed-to-obsidian`<br>Google Drive: `Obsidian Vault/` or `Obsidian Staging` |
 | **CUJ-4** | [Gmail OAuth 2.0 Web Handshake](#cuj-4-gmail-oauth-20-web-handshake) | Authenticate the processing service with Gmail to allow access to labeled threads. | Admin visits `/auth/gmail` on the deployed service. | Secret Manager: `GMAIL_USER_REFRESH_TOKEN` |
 | **CUJ-5** | [Gmail Watch Channel Renewal](#cuj-5-gmail-watch-channel-renewal) | Keep the Gmail push notification channel alive to ensure real-time email ingestion. | Cron trigger (daily/weekly) from Cloud Scheduler. | Gmail watch subscription registration with Pub/Sub. |
+| **CUJ-6** | [In-Vault Interactive Capture](#cuj-6-in-vault-interactive-capture) | 1-click open/create today's Project Update or Daily Journal note to add tasks and updates directly inside Obsidian without hardware or email triggers. | Click button on Project Hub or hit Daily Note shortcut in Obsidian. | Local Vault: `Project Updates/<Name>/YYYY-MM-DD - <Name>.md` or `Journal/YYYY-MM-DD.md` |
 
 ---
 
@@ -215,3 +216,30 @@ A background routine integrated into the existing renewal flow that periodically
 4. **Postconditions:**
    * Both the Google Drive and the Gmail push notification subscriptions are renewed.
    * Real-time events will continue to trigger **CUJ-3**.
+
+---
+
+## **CUJ-6: In-Vault Interactive Capture (Non-PLAUD / Non-Gmail Direct Entry)**
+
+### **Overview**
+Enables direct, native creation of project updates, notes, and tasks in Obsidian without hardware dictation or Gmail forwarding.
+
+### **Detailed Protocol**
+1. **Preconditions:**
+   * Obsidian Meta Bind and Templater (or native Daily Notes) plugins enabled.
+   * Active Project Hub contains the `[ 📝 Open Today's Project Update ]` button.
+2. **Trigger:** User clicks the update button on a Project Hub note, or triggers the Daily Note hotkey.
+3. **Execution Steps:**
+   * **Project Update Path**:
+     - Resolves file path `Project Updates/<ProjectName>/YYYY-MM-DD - <ProjectName>.md`.
+     - If file exists: opens it immediately in the workspace.
+     - If file does not exist: creates it with frontmatter (`type: project-update`, `timestamp: YYYY-MM-DD`), H1 heading, default tasks section, and hashtag `#project/<ProjectName>`, then opens it immediately.
+   * **Journal Entry Path**:
+     - Resolves file path `Journal/YYYY-MM-DD.md`.
+     - Opens existing file or creates it from template pre-tagged `#Journal`.
+   * User types notes or `- [ ]` tasks natively inside the document.
+4. **Postconditions:**
+   * The new/updated note is saved directly in the vault.
+   * Background sync (DriveSync/rclone) syncs changes to Google Drive without hitting Cloud Run.
+   * Tasks and Dataview queries automatically pick up the new tasks and update pages immediately.
+

@@ -113,9 +113,12 @@ To-dos live directly within your transcripts, logs, and notes using standard Mar
 
 ```tasks
 not done
-scheduled before in 1 week
+path does not include Template
+(scheduled on or before tomorrow) OR ((path includes Journal) AND (no scheduled date)) OR ((path includes Emails) AND (no scheduled date))
+sort by function task.scheduled.moment === null
 sort by scheduled
-
+group by folder
+short backlink
 ```
 
 
@@ -176,10 +179,10 @@ short backlink
 
 ## 📅 Chronological Update History
 ```dataview
-TABLE file.ctime AS "Date Dictated", summary AS "Key Focus"
+TABLE file.day AS "Date Dictated", summary AS "Key Focus"
 FROM "Project Updates"
 WHERE contains(file.path, this.project-folder)
-SORT file.ctime DESC
+SORT file.day DESC
 LIMIT 15
 ```
 
@@ -245,4 +248,89 @@ To handle recurring projects (such as annual trips or repeating project names) a
 4. **Active Workspace Reset:** A new active note can then be cleanly created at the original path to start the next project cycle. The Cloud Run routing engine will automatically spin up a fresh, empty `/Project Updates/tennessee` folder the next time the active project tag is dictated.
 
 This lifecycle is automated via local Meta Bind action buttons embedded directly within the active project hub pages.
+
+### F. Native In-Vault Interactive Capture (Non-PLAUD / Non-Gmail Workflow)
+
+For times when you want to add project updates, log notes, or record to-dos directly inside Obsidian without relying on PLAUD hardware dictation or Gmail forwarding:
+
+#### 1. 1-Click Project Update & Task Note Creation
+Embedded directly on each **Project Hub** page is a **`[ 📝 Open Today's Project Update ]`** Meta Bind inlineJS action button:
+
+* **Target Note Path**: `Project Updates/<project-folder>/YYYY-MM-DD - <ProjectName>.md`
+* **Behavior**:
+  * Reads `project-folder` from the current Project Hub's frontmatter.
+  * **If note exists**: Opens the file immediately in your active workspace tab.
+  * **If note does not exist**: Automatically creates the directory (if missing) and populates the file with YAML frontmatter (`type: project-update`, `timestamp: YYYY-MM-DD`, `summary: manual note`), H1 title, `#project/<project-folder>` hashtag, and default `## 📝 Notes & Log` and `## ⏳ Action Items` headers—then opens it immediately.
+* **Frontmatter Schema for Manual Updates**:
+  ```yaml
+  ---
+  type: project-update
+  timestamp: YYYY-MM-DD
+  summary: manual note
+  ---
+  ```
+* **Result & Routing**:
+  * **Task Routing**: Creating notes directly in `Project Updates/<project-folder>` guarantees that any `- [ ]` tasks added to the note contain the project path. They instantly surface in that Project Hub's **Untriaged Project Inbox** and **All Incomplete Tasks** queries, as well as the global Master Task Tracker.
+  * **Update History**: Having `summary: manual note` ensures the note renders cleanly in the Project Hub's `📅 Chronological Update History` Dataview table without blank metadata rows.
+
+* **Meta Bind Button Code Block**:
+  ```meta-bind-button
+  style: primary
+  label: "📝 Open Today's Project Update"
+  action:
+    type: inlineJS
+    code: |
+      const currentFile = app.workspace.getActiveFile();
+      if (!currentFile) {
+        new Notice("Error: No active file found.");
+        return;
+      }
+      const fm = app.metadataCache.getFileCache(currentFile)?.frontmatter;
+      const projectFolder = fm?.["project-folder"];
+      if (!projectFolder) {
+        new Notice("Error: 'project-folder' missing in frontmatter.");
+        return;
+      }
+
+      const todayStr = moment().format("YYYY-MM-DD");
+      const folderPath = `Project Updates/${projectFolder}`;
+      const filePath = `${folderPath}/${todayStr} - ${currentFile.basename}.md`;
+
+      let file = app.vault.getAbstractFileByPath(filePath);
+      if (!file) {
+        if (!app.vault.getAbstractFileByPath(folderPath)) {
+          await app.vault.createFolder(folderPath);
+        }
+        const initialContent = `---
+  type: project-update
+  timestamp: ${todayStr}
+  summary: manual note
+  ---
+
+  # ${currentFile.basename} Update - ${todayStr}
+
+  #project/${projectFolder}
+
+  ## 📝 Notes & Log
+
+
+  ## ⏳ Action Items
+  - [ ] 
+
+  `;
+        file = await app.vault.create(filePath, initialContent);
+        new Notice(`Created new project update note: ${file.name}`);
+      }
+      app.workspace.getLeaf().openFile(file);
+  ```
+
+#### 2. 1-Click Global To-Dos & Journal Note Entry
+Configured via Obsidian's core **Daily Notes** plugin (or sidebar ribbon icon / hotkey):
+* **Behavior**:
+  * Targets `/Journal/YYYY-MM-DD.md` (or `YYYY-MM-DD Journal Note.md`).
+  * **If file exists**: Opens today's Journal note immediately.
+  * **If file does not exist**: Creates it pre-populated with `#Journal` tag and `## ⏳ Global To-Dos` section, then opens it immediately.
+* **Result**: Zero form popups or modal prompts—1 click opens today's note, allowing immediate native typing of global to-dos (`- [ ]`) and daily thoughts.
+
+
 
