@@ -69,14 +69,15 @@ Because Obsidian requires local file system access, the Android storage pipeline
 
 
 
-### E. Linux & Desktop Sync Architecture (rclone mount)
+### E. Linux & Desktop Sync Architecture (rclone copy & ObsidianSync)
 
-For desktop and Linux environments, the system utilizes `rclone mount` with full VFS read/write caching managed as a systemd user daemon (`obsidian-mount.service`):
+For desktop and Linux environments, the system utilizes local storage at `~/ObsidianVault` paired with an automated background sync daemon managed by a systemd user service and timer (`obsidian-sync.timer` running `~/bin/ObsidianSync` every 15 seconds):
 
-* **Mount Target:** Mounts `obsidian-drive:` directly to `~/ObsidianVault` using `--vfs-cache-mode full`.
-* **Inbound Sync (Cloud ➔ Desktop):** Remote polling is set to 10 seconds (`--vfs-cache-poll-interval 10s`). Newly processed Plaud transcripts and Gmail notes automatically appear in Obsidian within ~10 seconds of GCP Cloud Run completion.
-* **Outbound Sync (Desktop ➔ Cloud):** Edits and new notes in Obsidian write instantly to local disk cache and upload to Google Drive with a 5-second debounce (`--vfs-write-back 5s`).
-* **Reliability:** Bypasses `rclone bisync` state databases and lockfiles completely, preventing sync locks and resync prompts.
+* **Local Fast Storage:** Obsidian opens `/home/napier/ObsidianVault` as a native local folder on SSD with zero mount latency or FUSE performance overhead.
+* **Background Daemon (`ObsidianSync`):** Installed at `~/bin/ObsidianSync` (source tracked in `plaud_processor/bin/ObsidianSync`), triggered every 15 seconds by systemd user timer `obsidian-sync.timer`.
+* **Bi-directional Copy Sync:** Executes `rclone copy` between `obsidian-drive:` and `~/ObsidianVault` using `--update` and `--skip-links` flags to pull remote updates and push local edits seamlessly.
+* **Network & Concurrency Safeguards:** Includes an online ping check (skips safely when offline) and lockfile protection (`flock`) to prevent concurrent process collisions.
+* **Reliability:** Eliminates FUSE transport endpoint disconnects and `rclone bisync` state locks, maintaining local file speed and reliability.
 
 
 ### F. The Email-to-Note Ingestion Pipeline (Gmail ➔ Gemini ➔ Obsidian)

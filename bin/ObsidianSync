@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Obsidian Vault Background Sync Script
+# Uses rclone copy for robust bi-directional updates without FUSE mount latency or bisync locks.
+
+LOCAL_VAULT="/home/napier/ObsidianVault"
+REMOTE_VAULT="obsidian-drive:"
+LOCK_FILE="/tmp/obsidian_sync.lock"
+
+# Ensure local vault directory exists
+mkdir -p "$LOCAL_VAULT"
+
+# 1. Lock file check: prevent concurrent runs
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+  echo "[$(date -Iseconds)] Sync already in progress. Exiting."
+  exit 0
+fi
+
+# 2. Network connectivity check
+# Check if internet / Google Drive is reachable before attempting sync
+if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+  echo "[$(date -Iseconds)] Offline: Internet unreachable. Skipping sync."
+  exit 0
+fi
+
+echo "[$(date -Iseconds)] Starting Obsidian Vault background sync..."
+
+# 3. Pull remote updates to local vault
+rclone copy "$REMOTE_VAULT" "$LOCAL_VAULT" \
+  --update \
+  --skip-links \
+  --quiet
+
+# 4. Push local changes to remote vault
+rclone copy "$LOCAL_VAULT" "$REMOTE_VAULT" \
+  --update \
+  --skip-links \
+  --quiet
+
+echo "[$(date -Iseconds)] Obsidian Vault sync completed successfully."
