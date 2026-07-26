@@ -1,6 +1,6 @@
 [config]
-model = "gemini/gemini-2.5-flash"
-fallback_models = ["gemini/gemini-1.5-flash", "gpt-4o"]
+model = "gemini/gemini-2.0-flash"
+fallback_models = ["gemini/gemini-1.5-flash"]
 output_relevant_configurations = true
 
 [github_app]
