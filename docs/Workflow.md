@@ -69,9 +69,15 @@ Because Obsidian requires local file system access, the Android storage pipeline
 
 
 
-### E. Linux & Desktop Sync Architecture (rclone)
+### E. Linux & Desktop Sync Architecture (rclone mount)
 
-For desktop and Linux environments, the system utilizes rclone --bisync to perform a bi-directional sync between the Google Drive folder and the local Obsidian vault, ensuring that changes are identical across all devices.
+For desktop and Linux environments, the system utilizes `rclone mount` with full VFS read/write caching managed as a systemd user daemon (`obsidian-mount.service`):
+
+* **Mount Target:** Mounts `obsidian-drive:` directly to `~/ObsidianVault` using `--vfs-cache-mode full`.
+* **Inbound Sync (Cloud ➔ Desktop):** Remote polling is set to 10 seconds (`--vfs-cache-poll-interval 10s`). Newly processed Plaud transcripts and Gmail notes automatically appear in Obsidian within ~10 seconds of GCP Cloud Run completion.
+* **Outbound Sync (Desktop ➔ Cloud):** Edits and new notes in Obsidian write instantly to local disk cache and upload to Google Drive with a 5-second debounce (`--vfs-write-back 5s`).
+* **Reliability:** Bypasses `rclone bisync` state databases and lockfiles completely, preventing sync locks and resync prompts.
+
 
 ### F. The Email-to-Note Ingestion Pipeline (Gmail ➔ Gemini ➔ Obsidian)
 
