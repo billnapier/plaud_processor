@@ -56,3 +56,19 @@ To allow Google Drive push notifications to resolve and reach the Cloud Run webh
 The project uses GitHub Actions and Terraform to deploy infrastructure and code updates.
 *   Pushing to the `main` branch triggers the deployment workflow.
 *   It logs in to GCP via Workload Identity Federation (WIF), builds and registers the Docker image to Artifact Registry, and runs `terraform apply` to deploy updates to Cloud Run.
+
+---
+
+## Qodo Code Review Agent
+This repository is configured with the **Qodo Code Review Agent** (PR Agent) for automated AI code reviews on Pull Requests.
+
+### Features & Workflow Integration
+* **Automated PR Summaries & Reviews**: When a PR is opened or updated, Qodo automatically posts a `/describe` overview and a detailed `/review` code review.
+* **Interactive Slash Commands**: You can trigger or customize agent actions directly by commenting on PRs:
+  - `/review` - Request an updated full code review.
+  - `/describe` - Regenerate the PR title, description, and list of changes.
+  - `/improve` - Ask for inline code improvement recommendations.
+  - `/ask <question>` - Ask Qodo specific questions about code changes in the PR.
+* **Configuration**: Custom repository review rules are configured in `.pr_agent.toml` at the root of the repository.
+* **API Authentication**: Configured via the `GEMINI_API_KEY` repository secret (`gh secret set GEMINI_API_KEY`).
+

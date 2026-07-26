@@ -1,0 +1,30 @@
+name: Qodo Code Review Agent
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  qodo_code_review:
+    name: Qodo PR Agent Review
+    runs-on: ubuntu-latest
+    if: ${{ github.event.sender.type != 'Bot' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Qodo PR Agent Action
+        id: pragent
+        uses: the-pr-agent/pr-agent@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_KEY: ${{ secrets.OPENAI_KEY || secrets.GEMINI_API_KEY }}
+          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CONFIG.MODEL: "gemini/gemini-2.5-flash"

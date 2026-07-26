@@ -1,0 +1,30 @@
+[config]
+model = "gemini/gemini-2.5-flash"
+fallback_models = ["gemini/gemini-1.5-flash", "gpt-4o"]
+output_relevant_configurations = true
+
+[github_app]
+pr_commands = [
+    "/describe",
+    "/review"
+]
+
+[pr_reviewer]
+extra_instructions = """
+- Review TypeScript code in app/ for proper async/await usage, idempotency, and Firestore locking patterns.
+- Ensure GCP Cloud Run, Pub/Sub, and Drive API error handling and retries follow standard practices.
+- Verify Terraform scripts in terraform/ adhere to least privilege IAM and clean GCP infrastructure provisioning.
+- Validate that Obsidian transcript note generation preserves markdown frontmatter and hashtag routing conventions.
+"""
+
+[pr_description]
+extra_instructions = """
+- Provide a concise summary of infrastructure and application logic changes.
+- Highlight any breaking changes to the GCP pipeline, Drive webhooks, or Obsidian markdown formatting.
+"""
+
+[pr_code_suggestions]
+extra_instructions = """
+- Suggest robust TypeScript typing, modular helper functions, and efficient GCP client usage.
+- Ensure security and secret management standards are met (no hardcoded keys or credentials).
+"""
