@@ -10,7 +10,10 @@ import { GoogleGenAI } from '@google/genai';
 const app = express();
 const port = process.env.PORT || 8080;
 
-app.use(express.json());
+// Security: Disable X-Powered-By to prevent framework information leakage
+app.disable('x-powered-by');
+// Security: Limit request body size to mitigate DoS attacks
+app.use(express.json({ limit: '1mb' }));
 
 // Initialize Google Cloud clients
 const db = new Firestore({
@@ -510,6 +513,15 @@ app.post('/webhook', async (req: Request, res: Response) => {
   const channelId = req.headers['x-goog-channel-id'] as string;
   const resourceId = req.headers['x-goog-resource-id'] as string;
   const resourceState = req.headers['x-goog-resource-state'] as string;
+
+  // Security: Input validation for webhook headers
+  if (!channelId || typeof channelId !== 'string' || channelId.length > 255 ||
+      !resourceId || typeof resourceId !== 'string' || resourceId.length > 255 ||
+      !resourceState || typeof resourceState !== 'string' || resourceState.length > 50) {
+    console.warn('Invalid or missing webhook headers received.');
+    res.status(400).send('Bad Request');
+    return;
+  }
 
   console.log(`Webhook Event - Channel: ${channelId}, Resource: ${resourceId}, State: ${resourceState}`);
 
