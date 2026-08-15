@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import { google } from 'googleapis';
 import { Firestore } from '@google-cloud/firestore';
 import { PubSub } from '@google-cloud/pubsub';
@@ -12,6 +12,17 @@ const port = process.env.PORT || 8080;
 
 // Security: Disable X-Powered-By to prevent framework information leakage
 app.disable('x-powered-by');
+
+// Security: Add missing critical HTTP security headers
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none';");
+  next();
+});
+
 // Security: Limit request body size to mitigate DoS attacks
 app.use(express.json({ limit: '1mb' }));
 
