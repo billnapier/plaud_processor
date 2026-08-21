@@ -534,6 +534,26 @@ app.post('/webhook', async (req: Request, res: Response) => {
     return;
   }
 
+  // Security: Verify webhook origin against registered channel
+  try {
+    const channelDoc = await db.collection('watch_channels').doc('inbox_channel').get();
+    if (!channelDoc.exists) {
+      console.warn('No active watch channel registered.');
+      res.status(403).send('Forbidden');
+      return;
+    }
+    const channelData = channelDoc.data();
+    if (channelData?.channelId !== channelId || channelData?.resourceId !== resourceId) {
+      console.warn('Webhook channel/resource mismatch. Potential spoofing attempt.');
+      res.status(403).send('Forbidden');
+      return;
+    }
+  } catch (err) {
+    console.error('Error verifying webhook channel:', err);
+    res.status(500).send('Internal Server Error');
+    return;
+  }
+
   console.log(`Webhook Event - Channel: ${channelId}, Resource: ${resourceId}, State: ${resourceState}`);
 
   if (resourceState === 'sync') {
